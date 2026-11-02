@@ -1,0 +1,28 @@
+# Operating System files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE & Editor files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Environment files
+.env
+.env.local
+
+# Server & PHP error logs
+*.log
+error_log
+
+# Uploads tracking
+uploads/references/*
+uploads/deliverables/*
+!uploads/references/drone_cage_dimensions.pdf
+!uploads/references/penthouse_floorplan_sketch.jpg
+!uploads/deliverables/sample_drone_mount.stl
+!uploads/deliverables/penthouse_living_render_final.jpg
+!uploads/.htaccess
