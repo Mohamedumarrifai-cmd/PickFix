@@ -387,6 +387,8 @@ require_once __DIR__ . '/includes/header.php';
                         <div>
                             <label class="block text-xs font-bold text-slate-300 mb-1.5 uppercase">Breakdown / Vehicle Location</label>
                             <input type="text" id="mechAddress" name="customer_address" value="Galle Road, Colombo 03" class="w-full bg-slate-950 border border-slate-700 rounded-xl px-4 py-3 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-amber-500 transition" required>
+                            <input type="hidden" id="mechLat" name="customer_lat" value="6.92710000">
+                            <input type="hidden" id="mechLng" name="customer_lng" value="79.86120000">
                         </div>
 
                         <div>
@@ -931,6 +933,156 @@ let activeChatPollInterval = null;
 // Initial payload from server
 let serverBookings = <?= json_encode($customerBookings) ?>;
 
+// Initialize Interactive Leaflet Maps (Free OpenStreetMap Tiles)
+function initMaps() {
+    const osmTileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+    const osmAttrib = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+
+    // 1. General Trades Map
+    const pEl = document.getElementById('physicalLiveMap');
+    if (pEl && !physicalMap) {
+        try {
+            physicalMap = L.map('physicalLiveMap').setView([clientLat, clientLng], 13);
+            L.tileLayer(osmTileUrl, { attribution: osmAttrib, maxZoom: 19 }).addTo(physicalMap);
+        } catch (e) {
+            console.warn("physicalMap init error:", e);
+        }
+    }
+
+    // 2. Garage Mechanics Map
+    const mEl = document.getElementById('mechanicsLiveMap');
+    if (mEl && !mechanicsMap) {
+        try {
+            mechanicsMap = L.map('mechanicsLiveMap').setView([clientLat, clientLng], 13);
+            L.tileLayer(osmTileUrl, { attribution: osmAttrib, maxZoom: 19 }).addTo(mechanicsMap);
+        } catch (e) {
+            console.warn("mechanicsMap init error:", e);
+        }
+    }
+
+    updateClientPins();
+}
+
+// Auto-fit bounds for Mechanics Map to display both customer pin & all garage markers
+function fitMechanicsMapBounds() {
+    if (!mechanicsMap) return;
+    try {
+        mechanicsMap.invalidateSize();
+        const points = [];
+        if (clientLat && clientLng) {
+            points.push([clientLat, clientLng]);
+        }
+        mechanicsMarkers.forEach(m => {
+            if (m && m.getLatLng) {
+                const ll = m.getLatLng();
+                if (ll && !isNaN(ll.lat) && !isNaN(ll.lng)) points.push([ll.lat, ll.lng]);
+            }
+        });
+
+        if (points.length > 1) {
+            const bounds = L.latLngBounds(points);
+            mechanicsMap.fitBounds(bounds, { padding: [50, 50], maxZoom: 14 });
+        } else if (points.length === 1) {
+            mechanicsMap.setView(points[0], 13);
+        }
+    } catch (e) {
+        console.warn("fitMechanicsMapBounds error:", e);
+    }
+}
+
+// Auto-fit bounds for General Trades Map
+function fitPhysicalMapBounds() {
+    if (!physicalMap) return;
+    try {
+        physicalMap.invalidateSize();
+        const points = [];
+        if (clientLat && clientLng) {
+            points.push([clientLat, clientLng]);
+        }
+        physicalMarkers.forEach(m => {
+            if (m && m.getLatLng) {
+                const ll = m.getLatLng();
+                if (ll && !isNaN(ll.lat) && !isNaN(ll.lng)) points.push([ll.lat, ll.lng]);
+            }
+        });
+
+        if (points.length > 1) {
+            const bounds = L.latLngBounds(points);
+            physicalMap.fitBounds(bounds, { padding: [50, 50], maxZoom: 14 });
+        } else if (points.length === 1) {
+            physicalMap.setView(points[0], 13);
+        }
+    } catch (e) {
+        console.warn("fitPhysicalMapBounds error:", e);
+    }
+}
+
+// Nominatim Free Geocoding API Search (Sri Lanka zero-cost geocoding)
+function searchNominatimAddress() {
+    const input = document.getElementById('nominatimSearchInput');
+    if (!input) return;
+    const query = input.value.trim();
+    if (!query) return;
+
+    const resText = document.getElementById('nominatimResultText');
+    if (resText) {
+        resText.classList.remove('hidden');
+        resText.innerText = "Querying OpenStreetMap Nominatim for: " + query + "...";
+    }
+
+    const nominatimUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query + ', Sri Lanka')}&limit=1`;
+
+    fetch(nominatimUrl, { headers: { 'Accept-Language': 'en' } })
+        .then(r => r.json())
+        .then(results => {
+            if (results && results.length > 0) {
+                const item = results[0];
+                clientLat = parseFloat(item.lat);
+                clientLng = parseFloat(item.lon);
+
+                ['custLat', 'mechLat'].forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.value = clientLat;
+                });
+                ['custLng', 'mechLng'].forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el) el.value = clientLng;
+                });
+
+                const shortName = item.display_name.split(',').slice(0, 3).join(',');
+                if (document.getElementById('physicalAddress')) document.getElementById('physicalAddress').value = shortName;
+                if (document.getElementById('mechAddress')) document.getElementById('mechAddress').value = shortName;
+
+                if (resText) {
+                    resText.innerText = `OSM Geocoded: ${item.display_name} (Lat: ${clientLat.toFixed(4)}, Lng: ${clientLng.toFixed(4)})`;
+                }
+
+                updateGpsBadge(`OSM Located: ${clientLat.toFixed(4)}, ${clientLng.toFixed(4)}`, true);
+                updateClientPins();
+
+                if (physicalMap) {
+                    physicalMap.invalidateSize();
+                    physicalMap.setView([clientLat, clientLng], 14);
+                }
+                if (mechanicsMap) {
+                    mechanicsMap.invalidateSize();
+                    mechanicsMap.setView([clientLat, clientLng], 14);
+                }
+
+                const physService = document.getElementById('physicalServiceType');
+                if (physService) fetchNearbyGeneralPros(physService.value);
+                fetchGarageMechanics();
+            } else {
+                if (resText) {
+                    resText.innerText = "No exact match found on OpenStreetMap. Try typing a city or street e.g. 'Nugegoda' or 'Colombo 03'.";
+                }
+            }
+        })
+        .catch(err => {
+            if (resText) resText.innerText = "Geocoding service unavailable: " + err.message;
+        });
+}
+
 document.addEventListener('DOMContentLoaded', function() {
     initMaps();
     startWatchingCustomerLocation();
@@ -1033,7 +1185,10 @@ function updateGpsBadge(label, isLive) {
 // Update customer pins across all visible Leaflet maps
 function updateClientPins() {
     clientPins.forEach(p => {
-        if (p && p._map) p._map.removeLayer(p);
+        try {
+            if (p && p.remove) p.remove();
+            else if (p && p._map) p._map.removeLayer(p);
+        } catch(e) {}
     });
     clientPins = [];
 
@@ -1045,16 +1200,22 @@ function updateClientPins() {
     });
 
     if (physicalMap) {
-        const pPin = L.marker([clientLat, clientLng], { icon: createPin() }).addTo(physicalMap).bindPopup("<strong>Your Location</strong>");
-        clientPins.push(pPin);
+        try {
+            const pPin = L.marker([clientLat, clientLng], { icon: createPin() }).addTo(physicalMap).bindPopup("<strong>Your Location</strong>");
+            clientPins.push(pPin);
+        } catch(e) {}
     }
     if (mechanicsMap) {
-        const mPin = L.marker([clientLat, clientLng], { icon: createPin() }).addTo(mechanicsMap).bindPopup("<strong>Your Location</strong>");
-        clientPins.push(mPin);
+        try {
+            const mPin = L.marker([clientLat, clientLng], { icon: createPin() }).addTo(mechanicsMap).bindPopup("<strong>Your Location</strong>");
+            clientPins.push(mPin);
+        } catch(e) {}
     }
     if (transitMap) {
-        const tPin = L.marker([clientLat, clientLng], { icon: createPin() }).addTo(transitMap).bindPopup("<strong>Service Destination</strong>");
-        clientPins.push(tPin);
+        try {
+            const tPin = L.marker([clientLat, clientLng], { icon: createPin() }).addTo(transitMap).bindPopup("<strong>Service Destination</strong>");
+            clientPins.push(tPin);
+        } catch(e) {}
     }
 }
 
@@ -1420,47 +1581,70 @@ function updateEtaDisplay(km, mins) {
     }
 }
 
-function refreshGPSLocation() {
-    detectCustomerLocation();
-}
-
 // Fetch Nearby General Trades
 function fetchNearbyGeneralPros(category) {
     const list = document.getElementById('generalProsList');
     const count = document.getElementById('generalProsCount');
 
+    if (!physicalMap) {
+        initMaps();
+    }
+
     fetch(`api/get_nearby_providers.php?category=${encodeURIComponent(category)}&lat=${clientLat}&lng=${clientLng}&radius=35`)
         .then(r => r.json())
         .then(data => {
-            physicalMarkers.forEach(m => physicalMap.removeLayer(m));
+            // Safely clear existing markers
+            physicalMarkers.forEach(m => {
+                try {
+                    if (m && m.remove) m.remove();
+                    else if (physicalMap) physicalMap.removeLayer(m);
+                } catch(e) {}
+            });
             physicalMarkers = [];
 
-            if (data.success && data.data.providers.length > 0) {
-                count.innerText = `${data.data.providers.length} Verified Online`;
-                list.innerHTML = '';
+            if (data.success && data.data && data.data.providers && data.data.providers.length > 0) {
+                if (count) count.innerText = `${data.data.providers.length} Verified Online`;
+                if (list) list.innerHTML = '';
 
                 data.data.providers.forEach(p => {
-                    const marker = L.marker([p.lat, p.lng]).addTo(physicalMap).bindPopup(`<strong>${p.name}</strong><br>${p.distance_str} (${p.eta_str})<br>${p.rate_display}`);
-                    physicalMarkers.push(marker);
+                    const pLat = parseFloat(p.lat);
+                    const pLng = parseFloat(p.lng);
 
-                    const div = document.createElement('div');
-                    div.className = "p-3 bg-slate-950/70 hover:bg-slate-950 rounded-2xl border border-slate-800 flex items-center justify-between gap-3 text-xs";
-                    div.innerHTML = `
-                        <div>
-                            <div class="font-bold text-white">${p.name} <span class="text-amber-400 text-[10px]">★ ${p.rating.toFixed(1)}</span></div>
-                            <div class="text-[11px] text-slate-400">${p.distance_str} • <span class="text-brand-400">${p.eta_str}</span></div>
-                        </div>
-                        <div class="text-right">
-                            <div class="font-bold text-white">${p.rate_display}</div>
-                            <button type="button" onclick="selectGeneralPro(${p.id}, '${p.name}')" class="mt-1 px-3 py-1 rounded-lg bg-dark-800 hover:bg-brand-500 hover:text-slate-950 text-slate-300 text-[11px] font-bold border border-slate-700">Select</button>
-                        </div>
-                    `;
-                    list.appendChild(div);
+                    if (physicalMap && !isNaN(pLat) && !isNaN(pLng)) {
+                        try {
+                            const marker = L.marker([pLat, pLng])
+                                .addTo(physicalMap)
+                                .bindPopup(`<strong>${p.name}</strong><br>${p.distance_str} (${p.eta_str})<br>${p.rate_display}`);
+                            physicalMarkers.push(marker);
+                        } catch(e) {}
+                    }
+
+                    if (list) {
+                        const div = document.createElement('div');
+                        div.className = "p-3 bg-slate-950/70 hover:bg-slate-950 rounded-2xl border border-slate-800 flex items-center justify-between gap-3 text-xs";
+                        div.innerHTML = `
+                            <div>
+                                <div class="font-bold text-white">${p.name} <span class="text-amber-400 text-[10px]">★ ${p.rating.toFixed(1)}</span></div>
+                                <div class="text-[11px] text-slate-400">${p.distance_str} • <span class="text-brand-400">${p.eta_str}</span></div>
+                            </div>
+                            <div class="text-right">
+                                <div class="font-bold text-white">${p.rate_display}</div>
+                                <button type="button" onclick="selectGeneralPro(${p.id}, '${p.name.replace(/'/g, "\\'")}')" class="mt-1 px-3 py-1 rounded-lg bg-dark-800 hover:bg-brand-500 hover:text-slate-950 text-slate-300 text-[11px] font-bold border border-slate-700">Select</button>
+                            </div>
+                        `;
+                        list.appendChild(div);
+                    }
                 });
+
+                fitPhysicalMapBounds();
             } else {
-                count.innerText = "0 Available";
-                list.innerHTML = `<div class="p-4 text-center text-xs text-slate-400 bg-slate-950/50 rounded-xl">No active pro in sector. Request will broadcast islandwide.</div>`;
+                if (count) count.innerText = "0 Available";
+                if (list) list.innerHTML = `<div class="p-4 text-center text-xs text-slate-400 bg-slate-950/50 rounded-xl">No active pro in sector. Request will broadcast islandwide.</div>`;
             }
+        })
+        .catch(err => {
+            console.error("fetchNearbyGeneralPros error:", err);
+            if (list) list.innerHTML = `<div class="p-4 text-center text-xs text-red-400">Failed to load trades pros: ${err.message}</div>`;
         });
 }
 
@@ -1478,76 +1662,111 @@ function clearSelectedGeneralPro() {
 
 // Fetch Garage Mechanics with Advanced Filters (Engine Type, Towing, Specialty)
 function fetchGarageMechanics() {
-    const engine = document.getElementById('mechFilterEngine').value;
-    const specialty = document.getElementById('mechFilterSpecialty').value;
-    const towing = document.getElementById('mechFilterTowing').checked ? '1' : '0';
+    const engineEl = document.getElementById('mechFilterEngine');
+    const specialtyEl = document.getElementById('mechFilterSpecialty');
+    const towingEl = document.getElementById('mechFilterTowing');
     const container = document.getElementById('garageCardsContainer');
     const pinCount = document.getElementById('mechanicMapPinCount');
 
-    container.innerHTML = `<div class="text-center py-6 text-slate-500 text-xs"><i class="fas fa-spinner fa-spin mr-1"></i> Querying nearby mechanics...</div>`;
+    const engine = engineEl ? engineEl.value : 'all';
+    const specialty = specialtyEl ? specialtyEl.value : 'all';
+    const towing = (towingEl && towingEl.checked) ? '1' : '0';
+
+    if (container) {
+        container.innerHTML = `<div class="text-center py-6 text-slate-500 text-xs"><i class="fas fa-spinner fa-spin mr-1"></i> Querying nearby mechanics...</div>`;
+    }
+
+    if (!mechanicsMap) {
+        initMaps();
+    }
 
     fetch(`api/get_nearby_providers.php?category=mechanic&engine_type=${encodeURIComponent(engine)}&specialty=${encodeURIComponent(specialty)}&towing_only=${towing}&lat=${clientLat}&lng=${clientLng}&radius=40`)
         .then(r => r.json())
         .then(data => {
-            mechanicsMarkers.forEach(m => mechanicsMap.removeLayer(m));
+            // Safely clear existing markers
+            mechanicsMarkers.forEach(m => {
+                try {
+                    if (m && m.remove) m.remove();
+                    else if (mechanicsMap) mechanicsMap.removeLayer(m);
+                } catch(e) {}
+            });
             mechanicsMarkers = [];
 
-            if (data.success && data.data.providers.length > 0) {
-                pinCount.innerText = `${data.data.providers.length} Garages Located`;
-                container.innerHTML = '';
+            if (data.success && data.data && data.data.providers && data.data.providers.length > 0) {
+                if (pinCount) pinCount.innerText = `${data.data.providers.length} Garages Located`;
+                if (container) container.innerHTML = '';
 
                 data.data.providers.forEach(g => {
-                    // Custom pin for garage
+                    const gLat = parseFloat(g.lat);
+                    const gLng = parseFloat(g.lng);
+
+                    // Custom pin for garage with valid FontAwesome icon
                     const gIcon = L.divIcon({
                         className: 'garage-map-pin',
-                        html: `<div style="background-color: #f59e0b; width: 34px; height: 34px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 4px 12px rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center;"><i class="fas fa-car-wrench" style="color: #020617; font-size: 14px;"></i></div>`,
-                        iconSize: [34, 34],
-                        iconAnchor: [17, 17]
+                        html: `<div style="background-color: #f59e0b; width: 36px; height: 36px; border-radius: 50%; border: 3px solid #ffffff; box-shadow: 0 4px 12px rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; cursor: pointer;"><i class="fas fa-screwdriver-wrench" style="color: #020617; font-size: 15px;"></i></div>`,
+                        iconSize: [36, 36],
+                        iconAnchor: [18, 18]
                     });
 
-                    const marker = L.marker([g.lat, g.lng], { icon: gIcon })
-                        .addTo(mechanicsMap)
-                        .bindPopup(`
-                            <div style="font-family: sans-serif; font-size: 12px; color: #0f172a;">
-                                <strong>${g.workshop_name}</strong><br>
-                                <span style="color: #d97706; font-weight: bold;">${g.sub_category}</span><br>
-                                <span>${g.distance_str} (${g.eta_str})</span><br>
-                                <button onclick="selectGarageForBooking(${g.id}, '${g.workshop_name}')" style="margin-top: 5px; background: #d97706; color: white; border: none; padding: 4px 10px; border-radius: 6px; cursor: pointer; font-size: 11px; font-weight: bold;">Book This Garage</button>
-                            </div>
-                        `);
-                    mechanicsMarkers.push(marker);
+                    if (mechanicsMap && !isNaN(gLat) && !isNaN(gLng)) {
+                        try {
+                            const marker = L.marker([gLat, gLng], { icon: gIcon })
+                                .addTo(mechanicsMap)
+                                .bindPopup(`
+                                    <div style="font-family: sans-serif; font-size: 12px; color: #0f172a; min-width: 170px;">
+                                        <strong style="font-size: 13px; color: #0f172a;">${g.workshop_name}</strong><br>
+                                        <span style="color: #d97706; font-weight: bold;">${g.sub_category}</span><br>
+                                        <span style="color: #475569;">${g.distance_str} (${g.eta_str})</span><br>
+                                        <button type="button" onclick="selectGarageForBooking(${g.id}, '${g.workshop_name.replace(/'/g, "\\'")}')" style="margin-top: 6px; background: #d97706; color: white; border: none; padding: 5px 12px; border-radius: 6px; cursor: pointer; font-size: 11px; font-weight: bold; width: 100%;">Book This Garage</button>
+                                    </div>
+                                `);
+                            mechanicsMarkers.push(marker);
+                        } catch (err) {
+                            console.error("Error adding marker for garage:", g.workshop_name, err);
+                        }
+                    }
 
                     // Add Card
-                    const card = document.createElement('div');
-                    card.className = "bg-dark-900 border border-slate-800 hover:border-amber-500/80 rounded-2xl p-4 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition";
-                    card.innerHTML = `
-                        <div class="space-y-1.5 flex-1">
-                            <div class="flex items-center gap-2">
-                                <h4 class="text-sm font-bold text-white">${g.workshop_name}</h4>
-                                ${g.towing_available ? '<span class="px-2 py-0.5 rounded text-[10px] bg-red-500/15 text-red-400 font-bold border border-red-500/30"><i class="fas fa-truck-pickup mr-1"></i> Towing Truck</span>' : ''}
+                    if (container) {
+                        const card = document.createElement('div');
+                        card.className = "bg-dark-900 border border-slate-800 hover:border-amber-500/80 rounded-2xl p-4 shadow-xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 transition";
+                        card.innerHTML = `
+                            <div class="space-y-1.5 flex-1">
+                                <div class="flex items-center gap-2">
+                                    <h4 class="text-sm font-bold text-white">${g.workshop_name}</h4>
+                                    ${g.towing_available ? '<span class="px-2 py-0.5 rounded text-[10px] bg-red-500/15 text-red-400 font-bold border border-red-500/30"><i class="fas fa-truck-pickup mr-1"></i> Towing Truck</span>' : ''}
+                                </div>
+                                <div class="text-xs text-amber-400 font-medium">${g.sub_category}</div>
+                                <div class="text-[11px] text-slate-400">
+                                    <span class="text-slate-300 font-semibold">${g.engine_types}</span> • ${g.distance_str} away (<span class="text-emerald-400 font-bold">${g.eta_str}</span>)
+                                </div>
+                                <div class="flex items-center gap-2 pt-1 text-[11px]">
+                                    ${g.stars_html}
+                                    <span class="text-slate-500 font-mono">(${g.reviews_count} reviews • ${g.total_jobs} jobs)</span>
+                                </div>
                             </div>
-                            <div class="text-xs text-amber-400 font-medium">${g.sub_category}</div>
-                            <div class="text-[11px] text-slate-400">
-                                <span class="text-slate-300 font-semibold">${g.engine_types}</span> • ${g.distance_str} away (<span class="text-emerald-400 font-bold">${g.eta_str}</span>)
+                            <div class="text-right flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-2">
+                                <div class="text-xs font-black text-white">${g.rate_display}</div>
+                                <button type="button" onclick="selectGarageForBooking(${g.id}, '${g.workshop_name.replace(/'/g, "\\'")}')" class="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-xs transition shadow-md">
+                                    Book Garage
+                                </button>
                             </div>
-                            <div class="flex items-center gap-2 pt-1 text-[11px]">
-                                ${g.stars_html}
-                                <span class="text-slate-500 font-mono">(${g.reviews_count} reviews • ${g.total_jobs} jobs)</span>
-                            </div>
-                        </div>
-                        <div class="text-right flex sm:flex-col items-center sm:items-end justify-between sm:justify-center gap-2">
-                            <div class="text-xs font-black text-white">${g.rate_display}</div>
-                            <button type="button" onclick="selectGarageForBooking(${g.id}, '${g.workshop_name}')" class="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-slate-950 font-black text-xs transition shadow-md">
-                                Book Garage
-                            </button>
-                        </div>
-                    `;
-                    container.appendChild(card);
+                        `;
+                        container.appendChild(card);
+                    }
                 });
+
+                // Auto-center and zoom map to encompass user location and all garages
+                fitMechanicsMapBounds();
+
             } else {
-                pinCount.innerText = "0 Garages";
-                container.innerHTML = `<div class="p-6 text-center text-xs text-slate-400 bg-slate-950/50 rounded-2xl">No garages found matching this specific powertrain or towing filter in a 40km radius. Try setting Engine to "All Engine Types".</div>`;
+                if (pinCount) pinCount.innerText = "0 Garages";
+                if (container) container.innerHTML = `<div class="p-6 text-center text-xs text-slate-400 bg-slate-950/50 rounded-2xl">No garages found matching this specific powertrain or towing filter in a 40km radius. Try setting Engine to "All Engine Types".</div>`;
             }
+        })
+        .catch(err => {
+            console.error("fetchGarageMechanics error:", err);
+            if (container) container.innerHTML = `<div class="p-4 text-center text-xs text-red-400">Failed to query mechanics: ${err.message}</div>`;
         });
 }
 
@@ -1563,7 +1782,7 @@ function clearSelectedMechanic() {
     document.getElementById('assignedMechanicNotice').classList.add('hidden');
 }
 
-// Tab Switching
+// Tab Switching with Leaflet Dimension Recalculation & Auto-Bounds Fitting
 function switchDashboardTab(tabId) {
     ['physical', 'mechanics', '3d_design', 'my_bookings'].forEach(t => {
         document.getElementById('tabContent-' + t)?.classList.add('hidden');
@@ -1580,8 +1799,17 @@ function switchDashboardTab(tabId) {
         else activeBtn.className = "flex-1 min-w-[140px] py-2.5 px-3 rounded-xl text-xs font-bold transition flex items-center justify-center gap-2 bg-slate-800 text-white border border-slate-700";
     }
 
-    if (tabId === 'physical' && physicalMap) setTimeout(() => physicalMap.invalidateSize(), 200);
-    if (tabId === 'mechanics' && mechanicsMap) setTimeout(() => mechanicsMap.invalidateSize(), 200);
+    if (tabId === 'physical') {
+        setTimeout(() => {
+            if (!physicalMap) initMaps();
+            fitPhysicalMapBounds();
+        }, 150);
+    } else if (tabId === 'mechanics') {
+        setTimeout(() => {
+            if (!mechanicsMap) initMaps();
+            fitMechanicsMapBounds();
+        }, 150);
+    }
 }
 
 // Emergency SOS Trigger
