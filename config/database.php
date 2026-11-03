@@ -387,6 +387,7 @@ function get_service_label(string $type): string {
         'mechanic'    => 'Garage Mechanic & Breakdown',
         'ac_repair'   => 'Inverter AC Repair & Service',
         '3d_design'   => '3D CAD & Digital Prototyping',
+        'driver'      => 'Transport & Chauffeur Services',
         'emergency'   => 'Emergency SOS Fast-Response'
     ];
     return $labels[$type] ?? ucfirst(str_replace('_', ' ', $type));

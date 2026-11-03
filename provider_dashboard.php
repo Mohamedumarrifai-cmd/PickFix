@@ -169,6 +169,11 @@ try {
 $providerCategory = $providerProfile['category'] ?? 'plumber';
 $is3DDesigner = ($providerCategory === '3d_design');
 $isMechanic = ($providerCategory === 'mechanic');
+$isDriver = ($providerCategory === 'driver');
+
+$categoryIcon = $is3DDesigner ? 'fa-cube' : ($isMechanic ? 'fa-screwdriver-wrench' : ($isDriver ? 'fa-taxi' : 'fa-tools'));
+$categoryGradient = $is3DDesigner ? 'from-indigo-600 to-accent-500' : ($isMechanic ? 'from-amber-500 to-orange-600' : ($isDriver ? 'from-sky-500 to-blue-600' : 'from-brand-500 to-emerald-600'));
+$categoryBadgeColor = $is3DDesigner ? 'text-indigo-400 bg-indigo-500/10 border-indigo-500/30' : ($isMechanic ? 'text-amber-400 bg-amber-500/10 border-amber-500/30' : ($isDriver ? 'text-sky-400 bg-sky-500/10 border-sky-500/30' : 'text-brand-400 bg-brand-500/10 border-brand-500/30'));
 
 require_once __DIR__ . '/includes/header.php';
 ?>
@@ -181,12 +186,12 @@ require_once __DIR__ . '/includes/header.php';
             
             <!-- Left Info -->
             <div class="flex items-center gap-4">
-                <div class="w-16 h-16 rounded-2xl bg-gradient-to-tr <?= $is3DDesigner ? 'from-indigo-600 to-accent-500' : ($isMechanic ? 'from-amber-500 to-orange-600' : 'from-brand-500 to-emerald-600') ?> flex items-center justify-center text-white text-2xl font-bold shadow-lg">
-                    <i class="fas <?= $is3DDesigner ? 'fa-cube' : ($isMechanic ? 'fa-car-wrench' : 'fa-tools') ?>"></i>
+                <div class="w-16 h-16 rounded-2xl bg-gradient-to-tr <?= $categoryGradient ?> flex items-center justify-center text-white text-2xl font-bold shadow-lg">
+                    <i class="fas <?= $categoryIcon ?>"></i>
                 </div>
                 <div>
                     <div class="flex items-center gap-2 mb-1">
-                        <span class="text-xs font-bold uppercase tracking-wider <?= $is3DDesigner ? 'text-indigo-400 bg-indigo-500/10 border-indigo-500/30' : ($isMechanic ? 'text-amber-400 bg-amber-500/10 border-amber-500/30' : 'text-brand-400 bg-brand-500/10 border-brand-500/30') ?> px-2.5 py-0.5 rounded-full border">
+                        <span class="text-xs font-bold uppercase tracking-wider <?= $categoryBadgeColor ?> px-2.5 py-0.5 rounded-full border">
                             <?= sanitize(get_service_label($providerCategory)) ?>
                         </span>
                         <span class="text-[11px] text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20 font-semibold flex items-center gap-1">
