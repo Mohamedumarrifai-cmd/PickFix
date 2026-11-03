@@ -50,9 +50,9 @@ try {
             p.bio,
             (SELECT COUNT(*) FROM reviews r WHERE r.provider_id = p.id) AS reviews_count,
             (6371 * ACOS(
-                COS(RADIANS(:cust_lat)) * COS(RADIANS(p.current_lat)) *
+                COS(RADIANS(:cust_lat1)) * COS(RADIANS(p.current_lat)) *
                 COS(RADIANS(p.current_lng) - RADIANS(:cust_lng)) +
-                SIN(RADIANS(:cust_lat)) * SIN(RADIANS(p.current_lat))
+                SIN(RADIANS(:cust_lat2)) * SIN(RADIANS(p.current_lat))
             )) AS distance_km
         FROM providers p
         INNER JOIN users u ON p.user_id = u.id
@@ -60,8 +60,9 @@ try {
     ";
 
     $params = [
-        ':cust_lat' => $customerLat,
-        ':cust_lng' => $customerLng
+        ':cust_lat1' => $customerLat,
+        ':cust_lat2' => $customerLat,
+        ':cust_lng'  => $customerLng
     ];
 
     if ($onlyOnline) {

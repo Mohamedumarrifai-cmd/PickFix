@@ -11,119 +11,164 @@
  * 6. Client 5-Star Reviews & Rating Showcase.
  */
 
+// Enable comprehensive error reporting during debugging
+error_reporting(E_ALL);
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
+
 require_once __DIR__ . '/config/database.php';
+pickfix_session_start();
 require_role('provider', 'login.php');
 
 $currentUser = current_user();
-$pageTitle = "Provider Job Radar & Deliveries";
-$db = get_db();
-
-// Fetch provider profile & telemetry
-$provStmt = $db->prepare("
-    SELECT p.*, u.name, u.email, u.phone 
-    FROM providers p 
-    JOIN users u ON p.user_id = u.id 
-    WHERE p.id = :pid LIMIT 1
-");
-$provStmt->execute([':pid' => $currentUser['provider_id']]);
-$providerProfile = $provStmt->fetch();
-
-if (!$providerProfile) {
-    die("Provider profile could not be loaded. Please re-login.");
+if (!$currentUser || empty($currentUser['id'])) {
+    if (!headers_sent()) {
+        header("Location: login.php");
+        exit;
+    } else {
+        echo "<script>window.location.href = 'login.php';</script>";
+        exit;
+    }
 }
 
-$providerCategory = $providerProfile['category'];
-$is3DDesigner = ($providerCategory === '3d_design');
-$isMechanic = ($providerCategory === 'mechanic');
-
-// Fetch Open / Radar Requests (Matching Category OR Emergency SOS)
-$radarStmt = $db->prepare("
-    SELECT 
-        b.*, 
-        u.name AS customer_name, 
-        u.phone AS customer_phone
-    FROM bookings b
-    JOIN users u ON b.customer_id = u.id
-    WHERE b.status = 'pending'
-      AND (b.service_type = :cat OR b.is_emergency = 1 OR :is_3d_cat = '3d_design' OR :is_mech_cat = 'mechanic')
-    ORDER BY b.is_emergency DESC, b.created_at DESC
-    LIMIT 25
-");
-$radarStmt->execute([
-    ':cat'         => $providerCategory,
-    ':is_3d_cat'   => $providerCategory,
-    ':is_mech_cat' => $providerCategory
-]);
-$incomingRadarRequests = $radarStmt->fetchAll();
-
-// Fetch Provider's Accepted / In-Progress Active Jobs
-$activeJobsStmt = $db->prepare("
-    SELECT 
-        b.*, 
-        u.name AS customer_name, 
-        u.phone AS customer_phone,
-        (SELECT COUNT(*) FROM messages m WHERE m.booking_id = b.id AND m.receiver_id = :uid AND m.is_read = 0) AS unread_messages
-    FROM bookings b
-    JOIN users u ON b.customer_id = u.id
-    WHERE b.provider_id = :pid 
-      AND b.status IN ('accepted', 'in_progress')
-    ORDER BY b.created_at DESC
-");
-$activeJobsStmt->execute([':pid' => $providerProfile['id'], ':uid' => $currentUser['id']]);
-$myActiveJobs = $activeJobsStmt->fetchAll();
-
-// Fetch Provider's Completed Job History
-$historyStmt = $db->prepare("
-    SELECT 
-        b.*, 
-        u.name AS customer_name, 
-        u.phone AS customer_phone,
-        r.rating AS review_rating,
-        r.comment AS review_comment
-    FROM bookings b
-    JOIN users u ON b.customer_id = u.id
-    LEFT JOIN reviews r ON b.id = r.booking_id
-    WHERE b.provider_id = :pid 
-      AND b.status = 'completed'
-    ORDER BY b.updated_at DESC
-    LIMIT 20
-");
-$historyStmt->execute([':pid' => $providerProfile['id']]);
-$completedJobs = $historyStmt->fetchAll();
-
-// Fetch Monetization Transactions
-$txnStmt = $db->prepare("
-    SELECT t.*, b.booking_code, b.project_title, u.name AS customer_name
-    FROM transactions t
-    JOIN bookings b ON t.booking_id = b.id
-    JOIN users u ON t.customer_id = u.id
-    WHERE t.provider_id = :pid
-    ORDER BY t.created_at DESC
-");
-$txnStmt->execute([':pid' => $providerProfile['id']]);
-$providerTransactions = $txnStmt->fetchAll();
-
-// Calculate revenue metrics
+$pageTitle = "Provider Job Radar & Deliveries";
+$providerProfile = null;
+$incomingRadarRequests = [];
+$myActiveJobs = [];
+$completedJobs = [];
+$providerTransactions = [];
+$providerReviews = [];
 $totalGross = 0;
 $totalPlatformFee = 0;
 $totalNetPayout = 0;
-foreach ($providerTransactions as $t) {
-    $totalGross += (float)$t['amount_lkr'];
-    $totalPlatformFee += (float)$t['platform_fee_lkr'];
-    $totalNetPayout += (float)$t['provider_payout_lkr'];
+
+try {
+    $db = get_db();
+
+    // Fetch provider profile & telemetry (check both provider_id and user_id for resilience)
+    $provStmt = $db->prepare("
+        SELECT p.*, u.name, u.email, u.phone 
+        FROM providers p 
+        JOIN users u ON p.user_id = u.id 
+        WHERE p.id = :pid OR p.user_id = :uid
+        LIMIT 1
+    ");
+    $provStmt->execute([
+        ':pid' => (int)($currentUser['provider_id'] ?? 0),
+        ':uid' => (int)$currentUser['id']
+    ]);
+    $providerProfile = $provStmt->fetch();
+
+    if (!$providerProfile) {
+        $_SESSION['flash_error'] = "Provider profile record not found. Please log in again.";
+        header("Location: login.php");
+        exit;
+    }
+
+    // Refresh session provider_id if needed
+    $_SESSION['provider_id'] = (int)$providerProfile['id'];
+    $_SESSION['provider_category'] = $providerProfile['category'];
+
+    $providerCategory = $providerProfile['category'];
+    $is3DDesigner = ($providerCategory === '3d_design');
+    $isMechanic = ($providerCategory === 'mechanic');
+
+    // Fetch Open / Radar Requests (Matching Category OR Emergency SOS)
+    $radarStmt = $db->prepare("
+        SELECT 
+            b.*, 
+            u.name AS customer_name, 
+            u.phone AS customer_phone
+        FROM bookings b
+        JOIN users u ON b.customer_id = u.id
+        WHERE b.status = 'pending'
+          AND (b.service_type = :cat OR b.is_emergency = 1 OR :is_3d_cat = '3d_design' OR :is_mech_cat = 'mechanic')
+        ORDER BY b.is_emergency DESC, b.created_at DESC
+        LIMIT 25
+    ");
+    $radarStmt->execute([
+        ':cat'         => $providerCategory,
+        ':is_3d_cat'   => $providerCategory,
+        ':is_mech_cat' => $providerCategory
+    ]);
+    $incomingRadarRequests = $radarStmt->fetchAll() ?: [];
+
+    // Fetch Provider's Accepted / In-Progress Active Jobs
+    $activeJobsStmt = $db->prepare("
+        SELECT 
+            b.*, 
+            u.name AS customer_name, 
+            u.phone AS customer_phone,
+            (SELECT COUNT(*) FROM messages m WHERE m.booking_id = b.id AND m.receiver_id = :uid AND m.is_read = 0) AS unread_messages
+        FROM bookings b
+        JOIN users u ON b.customer_id = u.id
+        WHERE b.provider_id = :pid 
+          AND b.status IN ('accepted', 'in_progress')
+        ORDER BY b.created_at DESC
+    ");
+    $activeJobsStmt->execute([
+        ':pid' => (int)$providerProfile['id'],
+        ':uid' => (int)$currentUser['id']
+    ]);
+    $myActiveJobs = $activeJobsStmt->fetchAll() ?: [];
+
+    // Fetch Provider's Completed Job History
+    $historyStmt = $db->prepare("
+        SELECT 
+            b.*, 
+            u.name AS customer_name, 
+            u.phone AS customer_phone,
+            r.rating AS review_rating,
+            r.comment AS review_comment
+        FROM bookings b
+        JOIN users u ON b.customer_id = u.id
+        LEFT JOIN reviews r ON b.id = r.booking_id
+        WHERE b.provider_id = :pid 
+          AND b.status = 'completed'
+        ORDER BY b.updated_at DESC
+        LIMIT 20
+    ");
+    $historyStmt->execute([':pid' => (int)$providerProfile['id']]);
+    $completedJobs = $historyStmt->fetchAll() ?: [];
+
+    // Fetch Monetization Transactions
+    $txnStmt = $db->prepare("
+        SELECT t.*, b.booking_code, b.project_title, u.name AS customer_name
+        FROM transactions t
+        JOIN bookings b ON t.booking_id = b.id
+        JOIN users u ON t.customer_id = u.id
+        WHERE t.provider_id = :pid
+        ORDER BY t.created_at DESC
+    ");
+    $txnStmt->execute([':pid' => (int)$providerProfile['id']]);
+    $providerTransactions = $txnStmt->fetchAll() ?: [];
+
+    // Calculate revenue metrics
+    foreach ($providerTransactions as $t) {
+        $totalGross += (float)$t['amount_lkr'];
+        $totalPlatformFee += (float)$t['platform_fee_lkr'];
+        $totalNetPayout += (float)$t['provider_payout_lkr'];
+    }
+
+    // Fetch Reviews
+    $reviewsStmt = $db->prepare("
+        SELECT r.*, u.name AS customer_name, b.project_title, b.booking_code
+        FROM reviews r
+        JOIN users u ON r.customer_id = u.id
+        JOIN bookings b ON r.booking_id = b.id
+        WHERE r.provider_id = :pid
+        ORDER BY r.created_at DESC
+    ");
+    $reviewsStmt->execute([':pid' => (int)$providerProfile['id']]);
+    $providerReviews = $reviewsStmt->fetchAll() ?: [];
+
+} catch (Throwable $e) {
+    error_log("[PickFix Provider Dashboard Error] " . $e->getMessage());
 }
 
-// Fetch Reviews
-$reviewsStmt = $db->prepare("
-    SELECT r.*, u.name AS customer_name, b.project_title, b.booking_code
-    FROM reviews r
-    JOIN users u ON r.customer_id = u.id
-    JOIN bookings b ON r.booking_id = b.id
-    WHERE r.provider_id = :pid
-    ORDER BY r.created_at DESC
-");
-$reviewsStmt->execute([':pid' => $providerProfile['id']]);
-$providerReviews = $reviewsStmt->fetchAll();
+$providerCategory = $providerProfile['category'] ?? 'plumber';
+$is3DDesigner = ($providerCategory === '3d_design');
+$isMechanic = ($providerCategory === 'mechanic');
 
 require_once __DIR__ . '/includes/header.php';
 ?>

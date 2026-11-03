@@ -8,9 +8,10 @@
  * Sri Lanka's Premier On-Demand Services & 3D Fabrication Platform
  */
 
-// Strict error reporting for clean production/dev diagnostics
+// Comprehensive error reporting during development/debugging to avoid silent 500 errors
 error_reporting(E_ALL);
-ini_set('display_errors', '0');
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
 ini_set('log_errors', '1');
 
 // Database Configuration Constants
@@ -51,18 +52,40 @@ class Database {
         $options = [
             PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
             PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
-            PDO::ATTR_EMULATE_PREPARES   => false,
+            PDO::ATTR_EMULATE_PREPARES   => true, // Enabled to allow safe parameter binding and prevent HY093 errors
             PDO::ATTR_PERSISTENT         => false,
-            PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci"
+            PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci",
+            PDO::MYSQL_ATTR_MULTI_STATEMENTS => true
         ];
 
         try {
             $this->connection = new PDO($dsn, DB_USER, DB_PASS, $options);
+            // Self-healing schema validation on connection
+            ensure_database_schema($this->connection);
         } catch (PDOException $e) {
             self::$lastError = $e->getMessage();
-            error_log("[PickFix Database Error] Connection failed: " . $e->getMessage());
-            // Do not expose raw credentials or stack traces to end users
-            $this->connection = null;
+            error_log("[PickFix Database Error] Initial connection failed: " . $e->getMessage());
+
+            // If the database itself does not exist (Error 1049), attempt auto-creation
+            if (strpos($e->getMessage(), '1049') !== false || strpos($e->getMessage(), 'Unknown database') !== false) {
+                try {
+                    $serverPdo = new PDO(
+                        sprintf('mysql:host=%s;port=%s;charset=%s', DB_HOST, DB_PORT, DB_CHARSET),
+                        DB_USER,
+                        DB_PASS,
+                        $options
+                    );
+                    $serverPdo->exec("CREATE DATABASE IF NOT EXISTS `" . DB_NAME . "` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci");
+                    $this->connection = new PDO($dsn, DB_USER, DB_PASS, $options);
+                    ensure_database_schema($this->connection);
+                    self::$lastError = null;
+                } catch (Throwable $initErr) {
+                    self::$lastError = $initErr->getMessage();
+                    $this->connection = null;
+                }
+            } else {
+                $this->connection = null;
+            }
         }
     }
 
@@ -110,6 +133,118 @@ class Database {
 }
 
 /**
+ * Self-healing schema compatibility checker
+ * Ensures that all newly introduced columns and tables exist so queries never throw 500 errors.
+ */
+function ensure_database_schema(PDO $pdo): void {
+    static $alreadyChecked = false;
+    if ($alreadyChecked) {
+        return;
+    }
+    $alreadyChecked = true;
+
+    try {
+        // Check if tables exist
+        $tables = $pdo->query("SHOW TABLES")->fetchAll(PDO::FETCH_COLUMN);
+
+        // 1. Providers columns
+        if (in_array('providers', $tables)) {
+            $provCols = $pdo->query("SHOW COLUMNS FROM providers")->fetchAll(PDO::FETCH_COLUMN);
+            if (!in_array('workshop_name', $provCols)) {
+                $pdo->exec("ALTER TABLE providers ADD COLUMN `workshop_name` VARCHAR(150) NULL AFTER `user_id`");
+            }
+            if (!in_array('engine_types', $provCols)) {
+                $pdo->exec("ALTER TABLE providers ADD COLUMN `engine_types` VARCHAR(120) NULL DEFAULT 'Petrol, Diesel, Hybrid/EV' AFTER `sub_category`");
+            }
+            if (!in_array('specialties', $provCols)) {
+                $pdo->exec("ALTER TABLE providers ADD COLUMN `specialties` VARCHAR(255) NULL AFTER `engine_types`");
+            }
+            if (!in_array('towing_available', $provCols)) {
+                $pdo->exec("ALTER TABLE providers ADD COLUMN `towing_available` TINYINT(1) NOT NULL DEFAULT 0 AFTER `specialties`");
+            }
+        }
+
+        // 2. Bookings columns
+        if (in_array('bookings', $tables)) {
+            $bookCols = $pdo->query("SHOW COLUMNS FROM bookings")->fetchAll(PDO::FETCH_COLUMN);
+            if (!in_array('payment_status', $bookCols)) {
+                $pdo->exec("ALTER TABLE bookings ADD COLUMN `payment_status` ENUM('unpaid', 'pending', 'paid') NOT NULL DEFAULT 'unpaid' AFTER `budget`");
+            }
+            if (!in_array('paid_amount', $bookCols)) {
+                $pdo->exec("ALTER TABLE bookings ADD COLUMN `paid_amount` DECIMAL(10, 2) NULL AFTER `payment_status`");
+            }
+            if (!in_array('payment_method', $bookCols)) {
+                $pdo->exec("ALTER TABLE bookings ADD COLUMN `payment_method` VARCHAR(50) NULL AFTER `paid_amount`");
+            }
+        }
+
+        // 3. Messages table
+        if (!in_array('messages', $tables)) {
+            $pdo->exec("
+                CREATE TABLE IF NOT EXISTS `messages` (
+                    `id` INT AUTO_INCREMENT PRIMARY KEY,
+                    `booking_id` INT NOT NULL,
+                    `sender_id` INT NOT NULL,
+                    `receiver_id` INT NOT NULL,
+                    `message_text` TEXT NOT NULL,
+                    `is_read` TINYINT(1) NOT NULL DEFAULT 0,
+                    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX `idx_messages_booking` (`booking_id`),
+                    INDEX `idx_messages_sender` (`sender_id`),
+                    INDEX `idx_messages_receiver` (`receiver_id`),
+                    INDEX `idx_messages_created` (`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            ");
+        }
+
+        // 4. Reviews table
+        if (!in_array('reviews', $tables)) {
+            $pdo->exec("
+                CREATE TABLE IF NOT EXISTS `reviews` (
+                    `id` INT AUTO_INCREMENT PRIMARY KEY,
+                    `booking_id` INT NOT NULL UNIQUE,
+                    `customer_id` INT NOT NULL,
+                    `provider_id` INT NOT NULL,
+                    `rating` TINYINT NOT NULL COMMENT '1 to 5 stars',
+                    `comment` TEXT NULL,
+                    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX `idx_reviews_provider` (`provider_id`),
+                    INDEX `idx_reviews_rating` (`rating`),
+                    INDEX `idx_reviews_created` (`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            ");
+        }
+
+        // 5. Transactions table
+        if (!in_array('transactions', $tables)) {
+            $pdo->exec("
+                CREATE TABLE IF NOT EXISTS `transactions` (
+                    `id` INT AUTO_INCREMENT PRIMARY KEY,
+                    `booking_id` INT NOT NULL,
+                    `customer_id` INT NOT NULL,
+                    `provider_id` INT NOT NULL,
+                    `amount_lkr` DECIMAL(10, 2) NOT NULL,
+                    `platform_fee_lkr` DECIMAL(10, 2) NOT NULL,
+                    `provider_payout_lkr` DECIMAL(10, 2) NOT NULL,
+                    `payment_gateway` ENUM('payhere', 'genie', 'cash') NOT NULL DEFAULT 'payhere',
+                    `status` ENUM('success', 'pending', 'failed') NOT NULL DEFAULT 'success',
+                    `transaction_ref` VARCHAR(60) NOT NULL UNIQUE,
+                    `payment_details` VARCHAR(255) NULL,
+                    `created_at` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    INDEX `idx_transactions_booking` (`booking_id`),
+                    INDEX `idx_transactions_customer` (`customer_id`),
+                    INDEX `idx_transactions_provider` (`provider_id`),
+                    INDEX `idx_transactions_status` (`status`),
+                    INDEX `idx_transactions_created` (`created_at`)
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+            ");
+        }
+    } catch (Throwable $e) {
+        error_log("[PickFix Auto-Migration Warning] " . $e->getMessage());
+    }
+}
+
+/**
  * Global helper to obtain the PDO database connection
  * 
  * @return PDO
@@ -119,34 +254,46 @@ function get_db(): PDO {
     $db = Database::getInstance()->getConnection();
     if (!$db) {
         $err = Database::getLastError();
-        throw new RuntimeException("Database connection unavailable. Please run the setup script or verify MySQL service. Details: " . $err);
+        throw new RuntimeException("Database connection unavailable. Please run setup_db.php or verify MySQL service in XAMPP. Details: " . $err);
     }
     return $db;
 }
 
 /**
- * Start secure session with modern flags
+ * Safe database helper that returns null instead of throwing
+ */
+function get_db_safe(): ?PDO {
+    try {
+        return Database::getInstance()->getConnection();
+    } catch (Throwable $e) {
+        return null;
+    }
+}
+
+/**
+ * Start secure session with modern flags and headers-sent protection
  */
 function pickfix_session_start(): void {
     if (session_status() === PHP_SESSION_NONE) {
-        // Safe session configuration
-        ini_set('session.cookie_httponly', '1');
-        ini_set('session.use_only_cookies', '1');
-        ini_set('session.cookie_samesite', 'Lax');
+        if (!headers_sent()) {
+            ini_set('session.cookie_httponly', '1');
+            ini_set('session.use_only_cookies', '1');
+            ini_set('session.cookie_samesite', 'Lax');
+        }
         session_start();
     }
 }
 
 /**
- * Check if a user is currently authenticated
+ * Check if a user is currently authenticated with valid positive ID
  */
 function is_logged_in(): bool {
     pickfix_session_start();
-    return !empty($_SESSION['user_id']) && !empty($_SESSION['role']);
+    return !empty($_SESSION['user_id']) && is_numeric($_SESSION['user_id']) && (int)$_SESSION['user_id'] > 0 && !empty($_SESSION['role']);
 }
 
 /**
- * Get the currently authenticated user's session data
+ * Get the currently authenticated user's session data safely
  */
 function current_user(): ?array {
     pickfix_session_start();
@@ -154,18 +301,18 @@ function current_user(): ?array {
         return null;
     }
     return [
-        'id'          => $_SESSION['user_id'],
+        'id'          => (int)$_SESSION['user_id'],
         'name'        => $_SESSION['user_name'] ?? 'User',
         'email'       => $_SESSION['user_email'] ?? '',
         'phone'       => $_SESSION['user_phone'] ?? '',
         'role'        => $_SESSION['role'] ?? 'customer',
-        'provider_id' => $_SESSION['provider_id'] ?? null,
+        'provider_id' => !empty($_SESSION['provider_id']) ? (int)$_SESSION['provider_id'] : null,
         'category'    => $_SESSION['provider_category'] ?? null
     ];
 }
 
 /**
- * Enforce role authorization or redirect
+ * Enforce role authorization or redirect safely without throwing unhandled exceptions
  * 
  * @param array|string $allowedRoles 'customer', 'provider', or ['customer', 'provider']
  * @param string $redirectFallback Target location if unauthorized
@@ -174,19 +321,27 @@ function require_role($allowedRoles, string $redirectFallback = 'login.php'): vo
     pickfix_session_start();
     if (!is_logged_in()) {
         $_SESSION['flash_error'] = "Please sign in to access this page.";
-        header("Location: $redirectFallback");
-        exit;
+        if (!headers_sent()) {
+            header("Location: $redirectFallback");
+            exit;
+        } else {
+            echo "<script>window.location.href = '" . addslashes($redirectFallback) . "';</script>";
+            exit;
+        }
     }
 
     $roles = is_array($allowedRoles) ? $allowedRoles : [$allowedRoles];
-    if (!in_array($_SESSION['role'], $roles, true)) {
-        // Redirect to their respective dashboard
-        if ($_SESSION['role'] === 'provider') {
-            header("Location: provider_dashboard.php");
+    $currentRole = $_SESSION['role'] ?? '';
+
+    if (!in_array($currentRole, $roles, true)) {
+        $target = ($currentRole === 'provider') ? 'provider_dashboard.php' : 'customer_dashboard.php';
+        if (!headers_sent()) {
+            header("Location: $target");
+            exit;
         } else {
-            header("Location: customer_dashboard.php");
+            echo "<script>window.location.href = '" . addslashes($target) . "';</script>";
+            exit;
         }
-        exit;
     }
 }
 
@@ -194,7 +349,6 @@ function require_role($allowedRoles, string $redirectFallback = 'login.php'): vo
  * Standardized JSON API Response
  */
 function json_response(bool $success, $data = null, ?string $message = null, int $statusCode = 200): void {
-    // Clear any previous output buffers
     while (ob_get_level()) {
         ob_end_clean();
     }
@@ -230,7 +384,7 @@ function get_service_label(string $type): string {
     $labels = [
         'plumber'     => 'Plumbing & Water Works',
         'electrician' => 'Electrical & Solar Power',
-        'mechanic'    => 'Vehicle Mechanic & Breakdown',
+        'mechanic'    => 'Garage Mechanic & Breakdown',
         'ac_repair'   => 'Inverter AC Repair & Service',
         '3d_design'   => '3D CAD & Digital Prototyping',
         'emergency'   => 'Emergency SOS Fast-Response'
@@ -308,8 +462,8 @@ function calculate_commission(float $amountLkr, float $percent = PLATFORM_COMMIS
 /**
  * Render Payment Status Badge
  */
-function render_payment_badge(string $status): string {
-    $status = strtolower($status);
+function render_payment_badge(?string $status): string {
+    $status = strtolower((string)$status);
     if ($status === 'paid') {
         return '<span class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-500/10 text-emerald-400 border border-emerald-500/30"><i class="fas fa-check"></i> Paid</span>';
     } elseif ($status === 'pending') {
@@ -325,7 +479,7 @@ function render_payment_badge(string $status): string {
 function render_stars(float $rating): string {
     $full = floor($rating);
     $half = ($rating - $full) >= 0.5 ? 1 : 0;
-    $empty = 5 - $full - $half;
+    $empty = max(0, 5 - (int)$full - (int)$half);
 
     $html = '<span class="text-amber-400 inline-flex items-center gap-0.5">';
     for ($i = 0; $i < $full; $i++) {
@@ -340,5 +494,3 @@ function render_stars(float $rating): string {
     $html .= sprintf(' <span class="text-slate-300 font-bold ml-1 text-xs">%.1f</span></span>', $rating);
     return $html;
 }
-
-

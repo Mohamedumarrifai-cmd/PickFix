@@ -80,7 +80,7 @@ try {
                     p.sub_category AS provider_specialty,
                     r.rating AS review_rating,
                     r.comment AS review_comment,
-                    (SELECT COUNT(*) FROM messages m WHERE m.booking_id = b.id AND m.receiver_id = :cid AND m.is_read = 0) AS unread_messages
+                    (SELECT COUNT(*) FROM messages m WHERE m.booking_id = b.id AND m.receiver_id = :msg_rcv_id AND m.is_read = 0) AS unread_messages
                 FROM bookings b
                 LEFT JOIN providers p ON b.provider_id = p.id
                 LEFT JOIN users u_prov ON p.user_id = u_prov.id
@@ -90,7 +90,10 @@ try {
                 LIMIT 20
             ";
             $stmt = $db->prepare($sql);
-            $stmt->execute([':cid' => $currentUserId]);
+            $stmt->execute([
+                ':msg_rcv_id' => $currentUserId,
+                ':cid'        => $currentUserId
+            ]);
         } else {
             // Provider: view assigned or open jobs
             $provId = $currentUser['provider_id'] ?? 0;

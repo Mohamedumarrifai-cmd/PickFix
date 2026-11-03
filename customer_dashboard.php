@@ -11,35 +11,72 @@
  * 6. 5-Star rating & review submission updating provider ratings dynamically.
  */
 
+// Enable comprehensive error reporting during debugging to immediately catch syntax or query issues
+error_reporting(E_ALL);
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
+
 require_once __DIR__ . '/config/database.php';
+pickfix_session_start();
 require_role('customer', 'login.php');
 
 $currentUser = current_user();
-$pageTitle = "Customer Hub & Garage Mechanics Radar";
+if (!$currentUser || empty($currentUser['id'])) {
+    if (!headers_sent()) {
+        header("Location: login.php");
+        exit;
+    } else {
+        echo "<script>window.location.href = 'login.php';</script>";
+        exit;
+    }
+}
 
-// Query customer's existing bookings with reviews, payments & unread chat tallies
-$db = get_db();
-$stmt = $db->prepare("
-    SELECT 
-        b.*,
-        u.name AS provider_name,
-        u.phone AS provider_phone,
-        p.workshop_name,
-        p.rating AS provider_rating,
-        p.category AS provider_category,
-        p.sub_category AS provider_specialty,
-        r.rating AS customer_review_rating,
-        r.comment AS customer_review_comment,
-        (SELECT COUNT(*) FROM messages m WHERE m.booking_id = b.id AND m.receiver_id = :cid AND m.is_read = 0) AS unread_messages
-    FROM bookings b
-    LEFT JOIN providers p ON b.provider_id = p.id
-    LEFT JOIN users u ON p.user_id = u.id
-    LEFT JOIN reviews r ON b.id = r.booking_id
-    WHERE b.customer_id = :cid
-    ORDER BY b.created_at DESC
-");
-$stmt->execute([':cid' => $currentUser['id']]);
-$customerBookings = $stmt->fetchAll();
+$pageTitle = "Customer Hub & Garage Mechanics Radar";
+$customerBookings = [];
+$dbErrorNotice = null;
+
+// Query customer's existing bookings with reviews, payments & unread chat tallies using distinct PDO placeholders
+try {
+    $db = get_db();
+    $stmt = $db->prepare("
+        SELECT 
+            b.*,
+            u.name AS provider_name,
+            u.phone AS provider_phone,
+            COALESCE(p.workshop_name, u.name) AS workshop_name,
+            COALESCE(p.rating, 5.0) AS provider_rating,
+            p.category AS provider_category,
+            p.sub_category AS provider_specialty,
+            r.rating AS customer_review_rating,
+            r.comment AS customer_review_comment,
+            (SELECT COUNT(*) FROM messages m WHERE m.booking_id = b.id AND m.receiver_id = :msg_rcv_id AND m.is_read = 0) AS unread_messages
+        FROM bookings b
+        LEFT JOIN providers p ON b.provider_id = p.id
+        LEFT JOIN users u ON p.user_id = u.id
+        LEFT JOIN reviews r ON b.id = r.booking_id
+        WHERE b.customer_id = :cid
+        ORDER BY b.created_at DESC
+    ");
+    $stmt->execute([
+        ':msg_rcv_id' => (int)$currentUser['id'],
+        ':cid'        => (int)$currentUser['id']
+    ]);
+    $customerBookings = $stmt->fetchAll() ?: [];
+} catch (Throwable $e) {
+    error_log("[PickFix Customer Dashboard Error] " . $e->getMessage());
+    $dbErrorNotice = $e->getMessage();
+    
+    // Resilient fallback query without messages or reviews joins
+    try {
+        if (isset($db)) {
+            $fallback = $db->prepare("SELECT b.* FROM bookings b WHERE b.customer_id = :cid ORDER BY b.created_at DESC");
+            $fallback->execute([':cid' => (int)$currentUser['id']]);
+            $customerBookings = $fallback->fetchAll() ?: [];
+        }
+    } catch (Throwable $e2) {
+        $customerBookings = [];
+    }
+}
 
 // Handle URL query parameters for pre-filling
 $preSelectedService = $_GET['service'] ?? 'plumber';
@@ -50,6 +87,22 @@ require_once __DIR__ . '/includes/header.php';
 ?>
 
 <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 w-full">
+    
+    <?php if (!empty($dbErrorNotice)): ?>
+        <!-- Graceful Schema Sync Alert -->
+        <div class="mb-6 p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex flex-col sm:flex-row items-center justify-between gap-3 shadow-lg">
+            <div class="flex items-center gap-3">
+                <i class="fas fa-database text-lg text-amber-400"></i>
+                <div>
+                    <span class="font-bold block">Database Sync Mode Active:</span>
+                    <span class="text-amber-300/80"><?= sanitize($dbErrorNotice) ?></span>
+                </div>
+            </div>
+            <a href="setup_db.php?auto=1" class="px-3.5 py-1.5 rounded-xl bg-amber-500 text-slate-950 font-bold hover:bg-amber-400 transition whitespace-nowrap shadow-md">
+                <i class="fas fa-wrench mr-1"></i> Auto-Migrate Database
+            </a>
+        </div>
+    <?php endif; ?>
     
     <!-- Top Welcome & Emergency Quick Bar -->
     <div class="flex flex-col md:flex-row md:items-center justify-between pb-6 mb-8 border-b border-slate-800 gap-4">
@@ -500,15 +553,15 @@ require_once __DIR__ . '/includes/header.php';
                                 <?php if (!empty($b['provider_name'])): ?>
                                     <div class="flex items-center justify-between">
                                         <span class="text-slate-500">Assigned Pro:</span>
-                                        <span class="font-bold text-emerald-400"><?= sanitize($b['workshop_name'] ?: $b['provider_name']) ?></span>
+                                        <span class="font-bold text-emerald-400"><?= sanitize(!empty($b['workshop_name']) ? $b['workshop_name'] : $b['provider_name']) ?></span>
                                     </div>
                                     <div class="flex items-center justify-between">
                                         <span class="text-slate-500">Contact:</span>
-                                        <a href="tel:<?= sanitize($b['provider_phone']) ?>" class="text-slate-300 font-mono hover:text-white"><?= sanitize($b['provider_phone']) ?></a>
+                                        <a href="tel:<?= sanitize($b['provider_phone'] ?? '') ?>" class="text-slate-300 font-mono hover:text-white"><?= sanitize($b['provider_phone'] ?? 'N/A') ?></a>
                                     </div>
                                     <div class="flex items-center justify-between">
                                         <span class="text-slate-500">Rating:</span>
-                                        <?= render_stars((float)$b['provider_rating']) ?>
+                                        <?= render_stars((float)($b['provider_rating'] ?? 5.0)) ?>
                                     </div>
                                 <?php else: ?>
                                     <div class="text-slate-400 flex items-center gap-2">
@@ -557,31 +610,33 @@ require_once __DIR__ . '/includes/header.php';
                             <div class="flex items-center gap-3">
                                 <!-- Chat Button -->
                                 <?php if (!empty($b['provider_id'])): ?>
-                                    <button type="button" onclick="openChatModal(<?= $b['id'] ?>, '<?= addslashes(sanitize($b['booking_code'] . ' - ' . ($b['workshop_name'] ?: $b['provider_name']))) ?>')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs flex items-center gap-2 transition border border-slate-700">
+                                    <?php $assignedDisplayName = !empty($b['workshop_name']) ? $b['workshop_name'] : (!empty($b['provider_name']) ? $b['provider_name'] : 'Service Pro'); ?>
+                                    <button type="button" onclick="openChatModal(<?= (int)$b['id'] ?>, '<?= addslashes(sanitize(($b['booking_code'] ?? 'PF') . ' - ' . $assignedDisplayName)) ?>')" class="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs flex items-center gap-2 transition border border-slate-700">
                                         <i class="fas fa-comments text-brand-400"></i>
                                         <span>Message Pro</span>
-                                        <?php if ($b['unread_messages'] > 0): ?>
-                                            <span class="px-1.5 py-0.2 rounded-full bg-brand-500 text-slate-950 font-mono text-[10px] font-bold"><?= $b['unread_messages'] ?></span>
+                                        <?php if (!empty($b['unread_messages']) && $b['unread_messages'] > 0): ?>
+                                            <span class="px-1.5 py-0.2 rounded-full bg-brand-500 text-slate-950 font-mono text-[10px] font-bold"><?= (int)$b['unread_messages'] ?></span>
                                         <?php endif; ?>
                                     </button>
                                 <?php endif; ?>
 
                                 <!-- PayHere / Payment Gateway Button -->
                                 <?php if (($b['payment_status'] ?? 'unpaid') !== 'paid' && !empty($b['provider_id'])): ?>
-                                    <button type="button" onclick="openPaymentModal(<?= $b['id'] ?>, '<?= sanitize($b['booking_code']) ?>', <?= floatval($b['budget'] ?: 3500) ?>)" class="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black text-xs flex items-center gap-1.5 shadow-lg shadow-emerald-500/20 transition">
+                                    <button type="button" onclick="openPaymentModal(<?= (int)$b['id'] ?>, '<?= sanitize($b['booking_code'] ?? '') ?>', <?= floatval($b['budget'] ?? 3500) ?>)" class="px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black text-xs flex items-center gap-1.5 shadow-lg shadow-emerald-500/20 transition">
                                         <i class="fas fa-credit-card"></i> Pay via PayHere / Genie
                                     </button>
                                 <?php endif; ?>
 
                                 <!-- 5-Star Review Button -->
-                                <?php if ($b['status'] === 'completed'): ?>
+                                <?php if (($b['status'] ?? '') === 'completed'): ?>
                                     <?php if (!empty($b['customer_review_rating'])): ?>
                                         <div class="text-xs text-amber-400 flex items-center gap-1 font-semibold">
                                             <span>Your Rating:</span>
                                             <?= render_stars((float)$b['customer_review_rating']) ?>
                                         </div>
                                     <?php else: ?>
-                                        <button type="button" onclick="openReviewModal(<?= $b['id'] ?>, '<?= addslashes(sanitize($b['workshop_name'] ?: $b['provider_name'])) ?>')" class="px-3.5 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 font-bold text-xs flex items-center gap-1.5 border border-amber-500/30 transition">
+                                        <?php $revDisplayName = !empty($b['workshop_name']) ? $b['workshop_name'] : (!empty($b['provider_name']) ? $b['provider_name'] : 'Pro'); ?>
+                                        <button type="button" onclick="openReviewModal(<?= (int)$b['id'] ?>, '<?= addslashes(sanitize($revDisplayName)) ?>')" class="px-3.5 py-2 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 font-bold text-xs flex items-center gap-1.5 border border-amber-500/30 transition">
                                             <i class="fas fa-star"></i> Rate & Review Pro
                                         </button>
                                     <?php endif; ?>

@@ -7,6 +7,11 @@
  * and sets up required upload directories.
  */
 
+// Enable comprehensive error reporting during setup
+error_reporting(E_ALL);
+ini_set('display_errors', '1');
+ini_set('display_startup_errors', '1');
+
 require_once __DIR__ . '/config/database.php';
 
 $outputMessages = [];
@@ -27,7 +32,8 @@ if ($autoRun) {
             DB_PASS,
             [
                 PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
-                PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4"
+                PDO::MYSQL_ATTR_INIT_COMMAND => "SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci",
+                PDO::MYSQL_ATTR_MULTI_STATEMENTS => true
             ]
         );
         $outputMessages[] = "<span class='text-emerald-400'>[OK]</span> Connected to MySQL server successfully.";
@@ -45,8 +51,9 @@ if ($autoRun) {
         $rawPdo->exec($sql);
         $outputMessages[] = "<span class='text-emerald-400'>[OK]</span> Schema and demo seeds executed successfully.";
 
-        // Step 4: Verify tables
+        // Step 4: Verify tables & run self-healing schema check
         $db = get_db();
+        ensure_database_schema($db);
         $tablesStmt = $db->query("SHOW TABLES");
         $tables = $tablesStmt->fetchAll(PDO::FETCH_COLUMN);
         $outputMessages[] = "<span class='text-emerald-400'>[OK]</span> Verified " . count($tables) . " tables: " . implode(', ', $tables);
