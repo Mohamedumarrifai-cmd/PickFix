@@ -75,6 +75,8 @@ try {
                     u_prov.name AS provider_name,
                     u_prov.phone AS provider_phone,
                     p.workshop_name,
+                    p.current_lat AS provider_lat,
+                    p.current_lng AS provider_lng,
                     p.rating AS provider_rating,
                     p.category AS provider_category,
                     p.sub_category AS provider_specialty,

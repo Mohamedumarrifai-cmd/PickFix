@@ -210,7 +210,7 @@ require_once __DIR__ . '/includes/header.php';
                 </div>
             </div>
 
-            <!-- Right: Online/Offline Interactive Toggle -->
+            <!-- Right: Online/Offline & Live GPS Telemetry Switch -->
             <div class="flex flex-wrap items-center gap-4">
                 <div class="flex items-center gap-3 bg-slate-950 p-3 rounded-2xl border border-slate-800">
                     <div class="flex flex-col text-right">
@@ -228,9 +228,10 @@ require_once __DIR__ . '/includes/header.php';
                     </label>
                 </div>
 
-                <button type="button" onclick="broadcastGPS()" class="px-4 py-3 rounded-2xl bg-dark-800 hover:bg-slate-800 text-slate-300 hover:text-white text-xs font-bold border border-slate-700 flex items-center gap-2 transition">
-                    <i class="fas fa-satellite-dish text-indigo-400"></i>
-                    <span>Ping GPS</span>
+                <!-- Continuous GPS Telemetry Auto-Stream Button -->
+                <button type="button" id="btnToggleGpsWatch" onclick="toggleProviderGpsStreaming()" class="px-4 py-3 rounded-2xl bg-dark-800 hover:bg-slate-800 text-slate-300 hover:text-white text-xs font-bold border border-slate-700 flex items-center gap-2 transition">
+                    <i class="fas fa-satellite-dish text-indigo-400" id="gpsStreamIcon"></i>
+                    <span id="gpsStreamText">Auto GPS Sync: OFF</span>
                 </button>
             </div>
         </div>
@@ -329,9 +330,14 @@ require_once __DIR__ . '/includes/header.php';
                 </p>
             </div>
         <?php else: ?>
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <?php foreach ($incomingRadarRequests as $req): ?>
-                    <div class="bg-dark-900 border <?= $req['is_emergency'] ? 'border-red-500/80 shadow-red-500/10' : 'border-slate-800 hover:border-slate-700' ?> rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5 transition relative overflow-hidden">
+            <div id="radarRequestsGrid" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <?php foreach ($incomingRadarRequests as $req): 
+                    $reqCustLat = !empty($req['customer_lat']) ? (float)$req['customer_lat'] : 6.9271;
+                    $reqCustLng = !empty($req['customer_lng']) ? (float)$req['customer_lng'] : 79.8612;
+                    $reqDist = haversine_distance((float)$providerProfile['current_lat'], (float)$providerProfile['current_lng'], $reqCustLat, $reqCustLng);
+                    $reqEta = calculate_transit_eta($reqDist);
+                ?>
+                    <div class="bg-dark-900 border <?= $req['is_emergency'] ? 'border-red-500/80 shadow-red-500/10' : 'border-slate-800 hover:border-slate-700' ?> rounded-2xl p-6 shadow-xl flex flex-col justify-between space-y-5 transition relative overflow-hidden" id="radarCard-<?= $req['id'] ?>">
                         <?php if ($req['is_emergency']): ?>
                             <div class="absolute top-0 right-0 bg-red-600 text-white text-[10px] uppercase font-black px-4 py-1 rounded-bl-xl tracking-wider flex items-center gap-1.5 animate-pulse">
                                 <i class="fas fa-bolt"></i> Emergency SOS (15-Min)
@@ -342,6 +348,9 @@ require_once __DIR__ . '/includes/header.php';
                             <div class="flex items-center gap-2 mb-3">
                                 <span class="font-mono text-xs font-bold text-slate-400 bg-slate-950 px-2 py-0.5 rounded border border-slate-800"><?= sanitize($req['booking_code']) ?></span>
                                 <span class="text-xs font-bold text-brand-400"><?= sanitize(get_service_label($req['service_type'])) ?></span>
+                                <span class="text-[11px] font-bold font-mono text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full ml-auto">
+                                    <i class="fas fa-route mr-1"></i> <?= $reqDist ?> km (<?= $reqEta ?> mins ETA)
+                                </span>
                             </div>
 
                             <h3 class="text-base font-bold text-white mb-2"><?= sanitize($req['project_title']) ?></h3>
@@ -373,6 +382,10 @@ require_once __DIR__ . '/includes/header.php';
                         </div>
 
                         <div class="pt-4 border-t border-slate-800 flex items-center gap-3">
+                            <a href="https://www.google.com/maps/dir/?api=1&destination=<?= $reqCustLat ?>,<?= $reqCustLng ?>" target="_blank" class="px-3.5 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white text-xs font-bold border border-slate-700 flex items-center gap-1.5 transition">
+                                <i class="fas fa-location-arrow text-emerald-400"></i>
+                                <span>Directions</span>
+                            </a>
                             <button type="button" onclick="acceptJob(<?= $req['id'] ?>)" class="flex-1 py-3 px-4 rounded-xl bg-brand-500 hover:bg-brand-600 text-slate-950 font-black text-xs uppercase tracking-wider transition shadow-lg shadow-brand-500/20 flex items-center justify-center gap-2">
                                 <i class="fas fa-check-circle"></i>
                                 <span>Accept & Claim Job</span>
@@ -433,6 +446,12 @@ require_once __DIR__ . '/includes/header.php';
                             </div>
 
                             <div class="md:col-span-4 bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2 text-xs">
+                                <?php
+                                    $jobCustLat = !empty($job['customer_lat']) ? (float)$job['customer_lat'] : 6.9271;
+                                    $jobCustLng = !empty($job['customer_lng']) ? (float)$job['customer_lng'] : 79.8612;
+                                    $jobDist = haversine_distance((float)$providerProfile['current_lat'], (float)$providerProfile['current_lng'], $jobCustLat, $jobCustLng);
+                                    $jobEta = calculate_transit_eta($jobDist);
+                                ?>
                                 <div class="flex items-center justify-between">
                                     <span class="text-slate-500">Client:</span>
                                     <span class="font-bold text-white"><?= sanitize($job['customer_name']) ?></span>
@@ -440,6 +459,10 @@ require_once __DIR__ . '/includes/header.php';
                                 <div class="flex items-center justify-between">
                                     <span class="text-slate-500">Phone:</span>
                                     <a href="tel:<?= sanitize($job['customer_phone']) ?>" class="text-brand-400 font-mono font-bold hover:underline"><?= sanitize($job['customer_phone']) ?></a>
+                                </div>
+                                <div class="flex items-center justify-between">
+                                    <span class="text-slate-500">Transit Distance:</span>
+                                    <span class="font-bold text-emerald-400 font-mono"><?= $jobDist ?> km (<?= $jobEta ?> mins ETA)</span>
                                 </div>
                                 <div class="flex items-center justify-between">
                                     <span class="text-slate-500">Address:</span>
@@ -451,6 +474,12 @@ require_once __DIR__ . '/includes/header.php';
                         <!-- Action Controls -->
                         <div class="pt-4 border-t border-slate-800 flex flex-wrap items-center justify-between gap-3">
                             <div class="flex items-center gap-2">
+                                <!-- Navigation Directions Link -->
+                                <a href="https://www.google.com/maps/dir/?api=1&destination=<?= $jobCustLat ?>,<?= $jobCustLng ?>" target="_blank" class="py-2 px-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white font-bold text-xs transition border border-slate-700 flex items-center gap-1.5">
+                                    <i class="fas fa-location-arrow text-emerald-400"></i>
+                                    <span>Navigation</span>
+                                </a>
+
                                 <!-- Real-Time Chat Button -->
                                 <button type="button" onclick="openChatModal(<?= $job['id'] ?>, 'Chat with <?= addslashes(sanitize($job['customer_name'])) ?>')" class="py-2 px-3.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs transition border border-slate-700 flex items-center gap-1.5">
                                     <i class="fas fa-comments text-brand-400"></i>
@@ -676,6 +705,129 @@ require_once __DIR__ . '/includes/header.php';
 
 <script>
 let pChatPollInterval = null;
+let gpsWatchId = null;
+let isStreamingGps = false;
+let knownRadarJobIds = new Set(<?= json_encode(array_column($incomingRadarRequests, 'id')) ?>);
+let providerCurrentLat = <?= floatval($providerProfile['current_lat']) ?>;
+let providerCurrentLng = <?= floatval($providerProfile['current_lng']) ?>;
+
+document.addEventListener('DOMContentLoaded', function() {
+    // Start background Job Radar polling loop (every 3.5 seconds)
+    setInterval(pollProviderRadar, 3500);
+});
+
+// Synthesize pleasant two-tone radar dispatch chime using Web Audio API (zero audio file dependencies)
+function playRadarChime() {
+    try {
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContext) return;
+        const ctx = new AudioContext();
+
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(587.33, ctx.currentTime); // D5
+        osc.frequency.setValueAtTime(880.00, ctx.currentTime + 0.12); // A5
+
+        gain.gain.setValueAtTime(0.25, ctx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+
+        osc.start();
+        osc.stop(ctx.currentTime + 0.5);
+
+        if ('vibrate' in navigator) {
+            navigator.vibrate([150, 80, 150]);
+        }
+    } catch (e) {
+        console.warn('Audio chime notice:', e);
+    }
+}
+
+// Continuous GPS Telemetry Streaming with HTML5 Geolocation API
+function toggleProviderGpsStreaming() {
+    const btn = document.getElementById('btnToggleGpsWatch');
+    const icon = document.getElementById('gpsStreamIcon');
+    const text = document.getElementById('gpsStreamText');
+
+    if (isStreamingGps) {
+        if (gpsWatchId) {
+            navigator.geolocation.clearWatch(gpsWatchId);
+            gpsWatchId = null;
+        }
+        isStreamingGps = false;
+        btn.className = "px-4 py-3 rounded-2xl bg-dark-800 hover:bg-slate-800 text-slate-300 hover:text-white text-xs font-bold border border-slate-700 flex items-center gap-2 transition";
+        icon.className = "fas fa-satellite-dish text-indigo-400";
+        text.innerText = "Auto GPS Sync: OFF";
+    } else {
+        if (!('geolocation' in navigator)) {
+            alert('Geolocation is not supported by your browser.');
+            return;
+        }
+
+        let lastSendTime = 0;
+        gpsWatchId = navigator.geolocation.watchPosition(
+            (pos) => {
+                providerCurrentLat = pos.coords.latitude;
+                providerCurrentLng = pos.coords.longitude;
+                const accuracy = Math.round(pos.coords.accuracy || 10);
+
+                // Throttle server updates to at most once every 8 seconds
+                const now = Date.now();
+                if (now - lastSendTime > 8000) {
+                    lastSendTime = now;
+                    const fd = new FormData();
+                    fd.append('lat', providerCurrentLat);
+                    fd.append('lng', providerCurrentLng);
+                    fetch('api/update_provider_status.php', { method: 'POST', body: fd });
+                }
+
+                text.innerText = `Auto GPS: ON (±${accuracy}m)`;
+            },
+            (err) => {
+                console.warn('Provider GPS watch notice:', err.message);
+                text.innerText = "GPS Permission Pending";
+            },
+            { enableHighAccuracy: true, timeout: 15000, maximumAge: 5000 }
+        );
+
+        isStreamingGps = true;
+        btn.className = "px-4 py-3 rounded-2xl bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 text-xs font-bold flex items-center gap-2 transition";
+        icon.className = "fas fa-satellite-dish text-emerald-400 animate-spin";
+        text.innerText = "Auto GPS: Active";
+    }
+}
+
+// Live Radar Polling Loop
+function pollProviderRadar() {
+    fetch('api/get_booking_status.php')
+        .then(r => r.json())
+        .then(res => {
+            if (res.success && res.data.bookings) {
+                const pendingList = res.data.bookings.filter(b => b.status === 'pending');
+                let foundNewJob = false;
+
+                pendingList.forEach(job => {
+                    const id = Number(job.id);
+                    if (!knownRadarJobIds.has(id)) {
+                        knownRadarJobIds.add(id);
+                        foundNewJob = true;
+                    }
+                });
+
+                if (foundNewJob) {
+                    playRadarChime();
+                    // Update Radar count in UI
+                    const badge = document.querySelector('[data-radar-badge]');
+                    if (badge) badge.innerText = pendingList.length;
+                }
+            }
+        })
+        .catch(err => console.warn('Radar poll notice:', err));
+}
 
 function switchProviderTab(tabKey) {
     ['radar', 'active', 'upload', 'payouts', 'reviews'].forEach(t => {

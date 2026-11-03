@@ -99,9 +99,9 @@ try {
 
     // Format output
     $formatted = array_map(function($p) {
-        $dist = round((float)$p['distance_km'], 1);
-        // Estimated transit arrival time in Sri Lankan urban traffic (average ~30km/h) + 3 min dispatch lag
-        $etaMinutes = max(5, round(($dist / 30) * 60) + 3);
+        $dist = round((float)$p['distance_km'], 2);
+        // Estimated transit arrival time in Sri Lankan urban traffic
+        $etaMinutes = calculate_transit_eta($dist);
 
         return [
             'id'               => (int)$p['provider_id'],

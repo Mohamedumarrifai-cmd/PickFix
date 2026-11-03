@@ -107,10 +107,15 @@ require_once __DIR__ . '/includes/header.php';
     <!-- Top Welcome & Emergency Quick Bar -->
     <div class="flex flex-col md:flex-row md:items-center justify-between pb-6 mb-8 border-b border-slate-800 gap-4">
         <div>
-            <div class="flex items-center gap-2 mb-1">
+            <div class="flex flex-wrap items-center gap-2 mb-1">
                 <span class="text-xs font-bold uppercase tracking-wider text-brand-400 bg-brand-500/10 px-2.5 py-0.5 rounded-full border border-brand-500/20">Client Dispatch Hub</span>
                 <span class="text-xs text-slate-500">•</span>
                 <span class="text-xs text-slate-400">Colombo & Islandwide Network</span>
+                <span class="text-xs text-slate-500">•</span>
+                <span id="liveGpsStatusBadge" class="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-mono font-bold">
+                    <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                    <span>Initializing GPS...</span>
+                </span>
             </div>
             <h1 class="text-2xl sm:text-3xl font-black text-white">
                 Ayubowan, <?= sanitize($currentUser['name']) ?>!
@@ -122,6 +127,13 @@ require_once __DIR__ . '/includes/header.php';
             <i class="fas fa-exclamation-triangle text-lg animate-bounce"></i>
             <span>INSTANT SOS DISPATCH (15-MIN)</span>
         </button>
+    </div>
+
+    <!-- ========================================================================= -->
+    <!-- PickMe-Style Real-Time Live Dispatch Radar & Transit Tracking Console     -->
+    <!-- ========================================================================= -->
+    <div id="liveDispatchConsole" class="mb-8 hidden">
+        <!-- Rendered dynamically by renderActiveDispatchConsole() -->
     </div>
 
     <!-- Navigation Tabs: Physical Trades vs Garage Mechanics vs 3D Design Lab vs Live Job Tracker -->
@@ -818,113 +830,593 @@ require_once __DIR__ . '/includes/header.php';
     </div>
 </div>
 
-<!-- Leaflet, Free OpenStreetMap & Nominatim Geocoding JavaScript -->
+<!-- PickMe-Style CSS Animations for Real-Time Radar & Transit Telemetry -->
+<style>
+.client-pulse-dot {
+    position: relative;
+    width: 24px;
+    height: 24px;
+    background: #0284c7;
+    border: 3px solid #ffffff;
+    border-radius: 50%;
+    box-shadow: 0 0 16px rgba(2, 132, 199, 0.9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.client-pulse-dot::after {
+    content: '';
+    position: absolute;
+    top: -12px;
+    left: -12px;
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    border: 2px solid rgba(2, 132, 199, 0.7);
+    animation: client-pulse-wave 2s infinite ease-out;
+}
+@keyframes client-pulse-wave {
+    0% { transform: scale(0.5); opacity: 1; }
+    100% { transform: scale(2.4); opacity: 0; }
+}
+
+.radar-sweep-beam {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 220px;
+    height: 220px;
+    margin-top: -110px;
+    margin-left: -110px;
+    border-radius: 50%;
+    background: conic-gradient(from 0deg, rgba(16, 185, 129, 0.45) 0deg, rgba(16, 185, 129, 0) 65deg);
+    animation: radar-sweep-spin 3s linear infinite;
+    pointer-events: none;
+    z-index: 450;
+}
+@keyframes radar-sweep-spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+}
+
+.provider-live-pin {
+    background: #10b981;
+    color: #020617;
+    width: 38px;
+    height: 38px;
+    border-radius: 50%;
+    border: 3px solid #ffffff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.6);
+    font-size: 15px;
+    transition: all 0.5s ease-in-out;
+}
+.provider-live-pin.mechanic-pin {
+    background: #f59e0b;
+}
+
+.pulse-badge {
+    animation: pulse-glow 1.5s infinite;
+}
+@keyframes pulse-glow {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.85; transform: scale(1.03); }
+}
+</style>
+
+<!-- Leaflet, Free OpenStreetMap, Geolocation & Live Dispatch JavaScript -->
 <script>
 let physicalMap = null;
 let mechanicsMap = null;
+let transitMap = null;
 let clientLat = 6.92710000;
 let clientLng = 79.86120000;
+let clientAccuracy = 15;
+let watchPositionId = null;
+
 let physicalMarkers = [];
 let mechanicsMarkers = [];
+let clientPins = [];
+
+// Transit and simulation state
+let activeTransitBooking = null;
+let activeTransitPolyline = null;
+let activeProviderMarker = null;
+let transitSimulationInterval = null;
+let lastKnownProStatus = null;
 let activeChatPollInterval = null;
+
+// Initial payload from server
+let serverBookings = <?= json_encode($customerBookings) ?>;
 
 document.addEventListener('DOMContentLoaded', function() {
     initMaps();
-    detectCustomerLocation();
+    startWatchingCustomerLocation();
     fetchNearbyGeneralPros('plumber');
     fetchGarageMechanics();
 
-    // 5-second background polling for booking status updates
-    setInterval(() => pollBookingsStatus(false), 5000);
+    // Check if user has an existing active booking to display on load
+    checkInitialActiveBooking();
+
+    // Background polling loop (every 4 seconds for real-time status & transit sync)
+    setInterval(() => pollBookingsStatus(false), 4000);
 });
 
-// Initialize Leaflet with free OpenStreetMap tile layers
-function initMaps() {
-    const osmTileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
-    const osmAttrib = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+// Calculate Haversine distance in kilometers
+function calculateHaversineKm(lat1, lon1, lat2, lon2) {
+    const R = 6371.0;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return parseFloat((R * c).toFixed(2));
+}
 
-    // 1. General Trades Map
-    const pEl = document.getElementById('physicalLiveMap');
-    if (pEl) {
-        physicalMap = L.map('physicalLiveMap').setView([clientLat, clientLng], 13);
-        L.tileLayer(osmTileUrl, { attribution: osmAttrib, maxZoom: 19 }).addTo(physicalMap);
+// Calculate estimated transit arrival time (ETA) in minutes
+function calculateTransitEta(distanceKm) {
+    const avgSpeedKmh = 28.0;
+    return Math.max(3, Math.round((distanceKm / avgSpeedKmh) * 60) + 3);
+}
+
+// Continuous HTML5 Geolocation Tracking with navigator.geolocation.watchPosition
+function startWatchingCustomerLocation() {
+    if (!('geolocation' in navigator)) {
+        updateGpsBadge("GPS Unavailable (Using Colombo)", false);
+        updateClientPins();
+        return;
     }
 
-    // 2. Garage Mechanics Map
-    const mEl = document.getElementById('mechanicsLiveMap');
-    if (mEl) {
-        mechanicsMap = L.map('mechanicsLiveMap').setView([clientLat, clientLng], 13);
-        L.tileLayer(osmTileUrl, { attribution: osmAttrib, maxZoom: 19 }).addTo(mechanicsMap);
-    }
-}
+    const options = {
+        enableHighAccuracy: true,
+        timeout: 20000,
+        maximumAge: 5000
+    };
 
-// Nominatim Free Geocoding API Search (Sri Lanka zero-cost geocoding)
-function searchNominatimAddress() {
-    const query = document.getElementById('nominatimSearchInput').value.trim();
-    if (!query) return;
-
-    const resText = document.getElementById('nominatimResultText');
-    resText.classList.remove('hidden');
-    resText.innerText = "Querying OpenStreetMap Nominatim...";
-
-    // Append Sri Lanka context to maximize accuracy
-    const nominatimUrl = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query + ', Sri Lanka')}&limit=1`;
-
-    fetch(nominatimUrl, { headers: { 'Accept-Language': 'en' } })
-        .then(r => r.json())
-        .then(results => {
-            if (results && results.length > 0) {
-                const item = results[0];
-                clientLat = parseFloat(item.lat);
-                clientLng = parseFloat(item.lon);
-
-                document.getElementById('custLat').value = clientLat;
-                document.getElementById('custLng').value = clientLng;
-                document.getElementById('physicalAddress').value = item.display_name.split(',').slice(0, 3).join(',');
-                document.getElementById('mechAddress').value = item.display_name.split(',').slice(0, 3).join(',');
-
-                resText.innerText = `OSM Geocoded: ${item.display_name} (Lat: ${clientLat.toFixed(4)}, Lng: ${clientLng.toFixed(4)})`;
-
-                if (physicalMap) physicalMap.setView([clientLat, clientLng], 14);
-                if (mechanicsMap) mechanicsMap.setView([clientLat, clientLng], 14);
-
-                updateClientPin();
-                fetchNearbyGeneralPros(document.getElementById('physicalServiceType').value);
-                fetchGarageMechanics();
-            } else {
-                resText.innerText = "No exact match found on Nominatim. Try typing a major city e.g. 'Nugegoda' or 'Colombo 03'.";
-            }
-        })
-        .catch(err => {
-            resText.innerText = "Nominatim API reached rate limit or is offline. Using current coordinates.";
-        });
-}
-
-function updateClientPin() {
-    const clientIcon = L.divIcon({
-        className: 'client-center-pin',
-        html: `<div style="background-color: #0284c7; width: 28px; height: 28px; border-radius: 50%; border: 3px solid #fff; box-shadow: 0 0 0 8px rgba(2, 132, 199, 0.3); display: flex; align-items: center; justify-content: center;"><i class="fas fa-street-view" style="color: #fff; font-size: 13px;"></i></div>`,
-        iconSize: [28, 28],
-        iconAnchor: [14, 14]
-    });
-
-    if (physicalMap) L.marker([clientLat, clientLng], { icon: clientIcon }).addTo(physicalMap).bindPopup("Your Location");
-    if (mechanicsMap) L.marker([clientLat, clientLng], { icon: clientIcon }).addTo(mechanicsMap).bindPopup("Your Location");
-}
-
-function detectCustomerLocation() {
-    if (navigator.geolocation) {
-        navigator.geolocation.getCurrentPosition((pos) => {
+    watchPositionId = navigator.geolocation.watchPosition(
+        (pos) => {
             clientLat = pos.coords.latitude;
             clientLng = pos.coords.longitude;
-            document.getElementById('custLat').value = clientLat;
-            document.getElementById('custLng').value = clientLng;
-            if (physicalMap) physicalMap.setView([clientLat, clientLng], 13);
-            if (mechanicsMap) mechanicsMap.setView([clientLat, clientLng], 13);
-            updateClientPin();
+            clientAccuracy = pos.coords.accuracy || 10;
+
+            // Sync hidden form coordinates
+            ['custLat', 'mechLat'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.value = clientLat;
+            });
+            ['custLng', 'mechLng'].forEach(id => {
+                const el = document.getElementById(id);
+                if (el) el.value = clientLng;
+            });
+
+            updateGpsBadge(`GPS Live (±${Math.round(clientAccuracy)}m)`, true);
+            updateClientPins();
+        },
+        (err) => {
+            console.warn("watchPosition notice:", err.message);
+            updateGpsBadge("Default GPS (Colombo)", false);
+            updateClientPins();
+        },
+        options
+    );
+}
+
+function refreshGPSLocation() {
+    if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(pos => {
+            clientLat = pos.coords.latitude;
+            clientLng = pos.coords.longitude;
+            updateClientPins();
+            if (physicalMap) physicalMap.setView([clientLat, clientLng], 14);
+            if (mechanicsMap) mechanicsMap.setView([clientLat, clientLng], 14);
             fetchNearbyGeneralPros(document.getElementById('physicalServiceType').value);
             fetchGarageMechanics();
         });
+    }
+}
+
+function updateGpsBadge(label, isLive) {
+    const badge = document.getElementById('liveGpsStatusBadge');
+    if (!badge) return;
+    if (isLive) {
+        badge.className = "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-mono font-bold";
+        badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span><span>${label}</span>`;
+    } else {
+        badge.className = "inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-mono font-bold";
+        badge.innerHTML = `<span class="w-2 h-2 rounded-full bg-amber-400"></span><span>${label}</span>`;
+    }
+}
+
+// Update customer pins across all visible Leaflet maps
+function updateClientPins() {
+    clientPins.forEach(p => {
+        if (p && p._map) p._map.removeLayer(p);
+    });
+    clientPins = [];
+
+    const createPin = () => L.divIcon({
+        className: 'client-custom-marker',
+        html: `<div class="client-pulse-dot"><i class="fas fa-street-view text-white text-[10px]"></i></div>`,
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+    });
+
+    if (physicalMap) {
+        const pPin = L.marker([clientLat, clientLng], { icon: createPin() }).addTo(physicalMap).bindPopup("<strong>Your Location</strong>");
+        clientPins.push(pPin);
+    }
+    if (mechanicsMap) {
+        const mPin = L.marker([clientLat, clientLng], { icon: createPin() }).addTo(mechanicsMap).bindPopup("<strong>Your Location</strong>");
+        clientPins.push(mPin);
+    }
+    if (transitMap) {
+        const tPin = L.marker([clientLat, clientLng], { icon: createPin() }).addTo(transitMap).bindPopup("<strong>Service Destination</strong>");
+        clientPins.push(tPin);
+    }
+}
+
+function checkInitialActiveBooking() {
+    if (!serverBookings || serverBookings.length === 0) return;
+    const active = serverBookings.find(b => ['pending', 'accepted', 'in_progress'].includes(b.status));
+    if (active) {
+        renderActiveDispatchConsole(active);
+    }
+}
+
+// Renders either Radar Scanning Console (if pending) OR Live Transit Map (if accepted/in_progress)
+function renderActiveDispatchConsole(b) {
+    const container = document.getElementById('liveDispatchConsole');
+    if (!container) return;
+    container.classList.remove('hidden');
+
+    activeTransitBooking = b;
+
+    const custLat = parseFloat(b.customer_lat) || clientLat;
+    const custLng = parseFloat(b.customer_lng) || clientLng;
+    const provLat = parseFloat(b.provider_lat) || (custLat + 0.022);
+    const provLng = parseFloat(b.provider_lng) || (custLng + 0.018);
+
+    const distanceKm = calculateHaversineKm(custLat, custLng, provLat, provLng);
+    const etaMinutes = calculateTransitEta(distanceKm);
+
+    // MODE 1: Pending Radar Broadcast State (Scanning Sector)
+    if (b.status === 'pending') {
+        if (transitSimulationInterval) {
+            clearInterval(transitSimulationInterval);
+            transitSimulationInterval = null;
+        }
+
+        container.innerHTML = `
+            <div class="bg-dark-900 border-2 ${b.is_emergency ? 'border-red-500 shadow-2xl shadow-red-500/20' : 'border-brand-500 shadow-2xl shadow-brand-500/20'} rounded-3xl p-6 sm:p-8 space-y-6 relative overflow-hidden">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+                    <div class="flex items-center gap-3">
+                        <span class="w-4 h-4 rounded-full bg-emerald-400 animate-ping"></span>
+                        <div>
+                            <span class="text-xs font-black uppercase tracking-widest text-emerald-400">PICKFIX LIVE DISPATCH RADAR</span>
+                            <h2 class="text-xl font-black text-white flex items-center gap-2">
+                                <span>Scanning Sector for Nearest Pro...</span>
+                                <span class="text-xs font-mono px-2 py-0.5 rounded bg-slate-950 text-slate-300 border border-slate-800">${b.booking_code}</span>
+                            </h2>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <button type="button" onclick="cancelBooking(${b.id})" class="px-4 py-2 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 text-xs font-bold border border-rose-500/30 transition">
+                            <i class="fas fa-times-circle mr-1"></i> Cancel Request
+                        </button>
+                    </div>
+                </div>
+
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
+                    <div class="lg:col-span-7 relative h-72 rounded-2xl overflow-hidden border border-slate-800">
+                        <div id="activeTransitMap" class="w-full h-full z-10"></div>
+                        <div class="radar-sweep-beam"></div>
+                    </div>
+
+                    <div class="lg:col-span-5 space-y-4">
+                        <div class="p-4 bg-slate-950 rounded-2xl border border-slate-800 space-y-3 text-xs">
+                            <div class="flex items-center justify-between text-slate-400">
+                                <span>Service Requested:</span>
+                                <span class="font-bold text-white capitalize">${b.service_type}</span>
+                            </div>
+                            <div class="flex items-center justify-between text-slate-400">
+                                <span>Emergency Priority:</span>
+                                <span class="font-bold text-red-400">${b.is_emergency ? '⚡ YES (15-Min Fast Dispatch)' : 'Standard'}</span>
+                            </div>
+                            <div class="flex items-center justify-between text-slate-400">
+                                <span>Broadcasting Range:</span>
+                                <span class="font-bold text-emerald-400 font-mono">15.0 km Radial Zone</span>
+                            </div>
+                            <div class="flex items-center justify-between text-slate-400">
+                                <span>Service Address:</span>
+                                <span class="font-semibold text-slate-200 truncate max-w-[200px]">${b.customer_address || 'Colombo Area'}</span>
+                            </div>
+                        </div>
+
+                        <div class="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 text-xs flex items-center gap-3">
+                            <i class="fas fa-satellite-dish text-xl animate-spin"></i>
+                            <div>
+                                <span class="font-bold block">Sector Providers Alerted</span>
+                                <span class="text-[11px] text-emerald-300/80">Awaiting provider acceptance. Estimated response: &lt; 45 seconds.</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        setTimeout(() => {
+            initTransitRadarMap(custLat, custLng, true);
+        }, 150);
+
+    // MODE 2: Pro Accepted & En Route (Live PickMe Transit Tracker)
+    } else if (b.status === 'accepted' || b.status === 'in_progress') {
+        const proName = b.workshop_name || b.provider_name || 'Assigned Pro';
+        const proPhone = b.provider_phone || '+94 77 123 4567';
+
+        container.innerHTML = `
+            <div class="bg-dark-900 border-2 border-emerald-500/80 shadow-2xl shadow-emerald-500/20 rounded-3xl p-6 sm:p-8 space-y-6 relative overflow-hidden">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+                    <div class="flex items-center gap-3">
+                        <span class="w-3.5 h-3.5 rounded-full bg-emerald-400 animate-ping"></span>
+                        <div>
+                            <span class="text-xs font-black uppercase tracking-widest text-emerald-400">PRO EN ROUTE • LIVE GPS TRANSIT TRACKING</span>
+                            <h2 class="text-xl font-black text-white flex items-center gap-2">
+                                <span>${proName} is Heading to You</span>
+                                <span class="text-xs font-mono px-2 py-0.5 rounded bg-slate-950 text-slate-300 border border-slate-800">${b.booking_code}</span>
+                            </h2>
+                        </div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <span id="liveTransitEtaBadge" class="px-3.5 py-1.5 rounded-xl bg-emerald-500 text-slate-950 font-black text-xs font-mono shadow-md pulse-badge">
+                            ${etaMinutes} MINS ETA
+                        </span>
+                        <span id="liveTransitDistBadge" class="px-3 py-1.5 rounded-xl bg-slate-800 text-emerald-400 font-bold text-xs font-mono border border-slate-700">
+                            ${distanceKm} km away
+                        </span>
+                    </div>
+                </div>
+
+                <!-- Live Transit Map View -->
+                <div class="grid grid-cols-1 lg:grid-cols-12 gap-6 items-center">
+                    <div class="lg:col-span-8 relative h-80 rounded-2xl overflow-hidden border border-slate-800">
+                        <div id="activeTransitMap" class="w-full h-full z-10"></div>
+                    </div>
+
+                    <div class="lg:col-span-4 space-y-4">
+                        <div class="p-4 bg-slate-950 rounded-2xl border border-slate-800 space-y-3 text-xs">
+                            <div class="flex items-center justify-between">
+                                <span class="text-slate-500">Assigned Pro:</span>
+                                <span class="font-bold text-white">${proName}</span>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-slate-500">Category:</span>
+                                <span class="font-bold text-brand-400 capitalize">${b.service_type}</span>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-slate-500">Direct Contact:</span>
+                                <a href="tel:${proPhone}" class="text-emerald-400 font-mono font-bold hover:underline">${proPhone}</a>
+                            </div>
+                            <div class="flex items-center justify-between">
+                                <span class="text-slate-500">Agreed Rate:</span>
+                                <span class="font-bold text-white">${b.budget ? 'Rs. ' + Number(b.budget).toLocaleString() : 'Negotiable'}</span>
+                            </div>
+                        </div>
+
+                        <!-- Direct Call and Chat Actions -->
+                        <div class="flex items-center gap-3">
+                            <a href="tel:${proPhone}" class="flex-1 py-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs flex items-center justify-center gap-2 border border-slate-700 transition">
+                                <i class="fas fa-phone text-emerald-400"></i> Call Pro
+                            </a>
+                            <button type="button" onclick="openChatModal(${b.id}, '${b.booking_code} - ${proName}')" class="flex-1 py-3 rounded-xl bg-brand-500 hover:bg-brand-600 text-slate-950 font-black text-xs flex items-center justify-center gap-2 transition shadow-md">
+                                <i class="fas fa-comment-dots"></i> Live Chat
+                            </button>
+                        </div>
+
+                        <!-- PayHere Quick Trigger -->
+                        ${(b.payment_status || 'unpaid') !== 'paid' ? `
+                            <button type="button" onclick="openPaymentModal(${b.id}, '${b.booking_code}', ${Number(b.budget || 3500)})" class="w-full py-2.5 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-xs font-bold border border-emerald-500/30 flex items-center justify-center gap-2 transition">
+                                <i class="fas fa-credit-card"></i> Pay via PayHere / Genie
+                            </button>
+                        ` : `
+                            <div class="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-400 text-xs text-center font-bold">
+                                <i class="fas fa-check-circle mr-1"></i> Paid in Full
+                            </div>
+                        `}
+                    </div>
+                </div>
+            </div>
+        `;
+
+        setTimeout(() => {
+            initTransitLiveRouteMap(custLat, custLng, provLat, provLng, b);
+        }, 150);
+
+    // MODE 3: Completed Service
+    } else if (b.status === 'completed') {
+        container.innerHTML = `
+            <div class="bg-dark-900 border border-emerald-500/50 rounded-3xl p-6 shadow-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div class="flex items-center gap-3">
+                    <div class="w-12 h-12 rounded-2xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center text-xl">
+                        <i class="fas fa-flag-checkered"></i>
+                    </div>
+                    <div>
+                        <div class="text-xs font-mono text-emerald-400 font-bold uppercase">Service Completed</div>
+                        <h3 class="text-base font-black text-white">${b.project_title || 'Work Finished'} (${b.booking_code})</h3>
+                        <p class="text-xs text-slate-400">Provider has delivered the service. Please settle payment and leave a rating.</p>
+                    </div>
+                </div>
+                <div class="flex items-center gap-3">
+                    ${(b.payment_status || 'unpaid') !== 'paid' ? `
+                        <button type="button" onclick="openPaymentModal(${b.id}, '${b.booking_code}', ${Number(b.budget || 3500)})" class="px-4 py-2.5 rounded-xl bg-emerald-500 text-slate-950 font-black text-xs transition shadow-md">
+                            Pay via PayHere
+                        </button>
+                    ` : ''}
+                    <button type="button" onclick="openReviewModal(${b.id}, '${b.workshop_name || b.provider_name || 'Pro'}')" class="px-4 py-2.5 rounded-xl bg-amber-500 text-slate-950 font-black text-xs transition shadow-md">
+                        Leave 5★ Review
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+}
+
+// Initialize Leaflet Map for Pending Radar Scanning
+function initTransitRadarMap(lat, lng, isPending) {
+    const el = document.getElementById('activeTransitMap');
+    if (!el) return;
+
+    if (transitMap) {
+        transitMap.remove();
+        transitMap = null;
+    }
+
+    const osmTileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+    transitMap = L.map('activeTransitMap', { zoomControl: false }).setView([lat, lng], 13);
+    L.tileLayer(osmTileUrl, { maxZoom: 19 }).addTo(transitMap);
+
+    const clientIcon = L.divIcon({
+        className: 'client-center-pin',
+        html: `<div class="client-pulse-dot"><i class="fas fa-broadcast-tower text-white text-[10px]"></i></div>`,
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+    });
+    L.marker([lat, lng], { icon: clientIcon }).addTo(transitMap).bindPopup("Your Location");
+
+    // Add surrounding radar blips
+    const blips = [
+        [lat + 0.012, lng + 0.015],
+        [lat - 0.014, lng + 0.018],
+        [lat + 0.020, lng - 0.010],
+        [lat - 0.008, lng - 0.019]
+    ];
+    blips.forEach(pos => {
+        const blipIcon = L.divIcon({
+            className: 'radar-blip-pin',
+            html: `<div style="background: rgba(16, 185, 129, 0.4); width: 14px; height: 14px; border-radius: 50%; border: 2px solid #10b981; animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;"></div>`,
+            iconSize: [14, 14],
+            iconAnchor: [7, 7]
+        });
+        L.marker(pos, { icon: blipIcon }).addTo(transitMap);
+    });
+
+    // Draw dispatch radius circle
+    L.circle([lat, lng], {
+        color: '#10b981',
+        fillColor: '#10b981',
+        fillOpacity: 0.08,
+        radius: 2500
+    }).addTo(transitMap);
+}
+
+// Initialize Leaflet Map for Live PickMe Route & Movement Simulation
+function initTransitLiveRouteMap(custLat, custLng, provLat, provLng, booking) {
+    const el = document.getElementById('activeTransitMap');
+    if (!el) return;
+
+    if (transitMap) {
+        transitMap.remove();
+        transitMap = null;
+    }
+
+    const osmTileUrl = 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png';
+    transitMap = L.map('activeTransitMap', { zoomControl: true }).setView([(custLat + provLat) / 2, (custLng + provLng) / 2], 13);
+    L.tileLayer(osmTileUrl, { maxZoom: 19 }).addTo(transitMap);
+
+    // 1. Customer Marker (Blue pulsating)
+    const custIcon = L.divIcon({
+        className: 'client-center-pin',
+        html: `<div class="client-pulse-dot"><i class="fas fa-home text-white text-[10px]"></i></div>`,
+        iconSize: [24, 24],
+        iconAnchor: [12, 12]
+    });
+    L.marker([custLat, custLng], { icon: custIcon }).addTo(transitMap).bindPopup("Your Location");
+
+    // 2. Provider Vehicle Marker
+    const isMech = (booking.service_type === 'mechanic');
+    const provIcon = L.divIcon({
+        className: 'pro-moving-pin',
+        html: `<div class="provider-live-pin ${isMech ? 'mechanic-pin' : ''}"><i class="fas ${isMech ? 'fa-car-side' : 'fa-van-shuttle'}"></i></div>`,
+        iconSize: [38, 38],
+        iconAnchor: [19, 19]
+    });
+    activeProviderMarker = L.marker([provLat, provLng], { icon: provIcon }).addTo(transitMap);
+
+    // 3. Draw Route Polyline
+    activeTransitPolyline = L.polyline([[provLat, provLng], [custLat, custLng]], {
+        color: isMech ? '#f59e0b' : '#10b981',
+        weight: 5,
+        opacity: 0.85,
+        dashArray: '8, 8'
+    }).addTo(transitMap);
+
+    transitMap.fitBounds(activeTransitPolyline.getBounds(), { padding: [40, 40] });
+
+    // Start Real-Time Route Movement Simulation
+    startRouteSimulation(booking, provLat, provLng, custLat, custLng);
+}
+
+// Route Movement Simulation Engine (Interpolates vehicle along waypoints with dynamic distance & countdown ETA)
+function startRouteSimulation(booking, startLat, startLng, targetLat, targetLng) {
+    if (transitSimulationInterval) {
+        clearInterval(transitSimulationInterval);
+    }
+
+    const totalSteps = 24;
+    let step = 0;
+
+    // Generate waypoints with realistic street curvature
+    const waypoints = [];
+    for (let i = 0; i <= totalSteps; i++) {
+        const ratio = i / totalSteps;
+        // Minor sinusoidal offset for realistic curved transit path
+        const curveOffset = Math.sin(ratio * Math.PI) * 0.003;
+        const lat = startLat + (targetLat - startLat) * ratio + curveOffset;
+        const lng = startLng + (targetLng - startLng) * ratio;
+        waypoints.push([lat, lng]);
+    }
+
+    transitSimulationInterval = setInterval(() => {
+        if (!activeProviderMarker || !transitMap) {
+            clearInterval(transitSimulationInterval);
+            return;
+        }
+
+        step++;
+        if (step >= waypoints.length) {
+            step = waypoints.length - 1;
+            clearInterval(transitSimulationInterval);
+            updateEtaDisplay(0.05, 1);
+            return;
+        }
+
+        const currentPos = waypoints[step];
+        activeProviderMarker.setLatLng(currentPos);
+
+        // Update remaining route polyline
+        if (activeTransitPolyline) {
+            activeTransitPolyline.setLatLngs([currentPos, [targetLat, targetLng]]);
+        }
+
+        const remainingKm = calculateHaversineKm(currentPos[0], currentPos[1], targetLat, targetLng);
+        const dynamicEta = calculateTransitEta(remainingKm);
+
+        updateEtaDisplay(remainingKm, dynamicEta);
+    }, 1800);
+}
+
+function updateEtaDisplay(km, mins) {
+    const etaBadge = document.getElementById('liveTransitEtaBadge');
+    const distBadge = document.getElementById('liveTransitDistBadge');
+
+    if (km <= 0.1) {
+        if (etaBadge) etaBadge.innerText = "ARRIVED ON SITE!";
+        if (distBadge) distBadge.innerText = "At Location";
+    } else {
+        if (etaBadge) etaBadge.innerText = `${mins} MINS ETA`;
+        if (distBadge) distBadge.innerText = `${km} km away`;
     }
 }
 
@@ -1106,10 +1598,12 @@ function handlePhysicalBooking(e) {
     e.preventDefault();
     const btn = document.getElementById('btnDispatchPhysical');
     btn.disabled = true;
-    btn.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i> Broadcasting to Radar...`;
+    btn.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i> Transmitting Request to Radar...`;
 
     const form = document.getElementById('physicalBookingForm');
     const fd = new FormData(form);
+    fd.append('customer_lat', clientLat);
+    fd.append('customer_lng', clientLng);
 
     fetch('api/create_booking.php', { method: 'POST', body: fd })
         .then(r => r.json())
@@ -1117,10 +1611,10 @@ function handlePhysicalBooking(e) {
             btn.disabled = false;
             btn.innerHTML = `<i class="fas fa-satellite-dish text-base mr-2"></i> Confirm & Broadcast Trade Request`;
             if (res.success) {
-                alert(`Trade request dispatched! Code: ${res.data.booking_code}`);
                 form.reset();
-                switchDashboardTab('my_bookings');
-                pollBookingsStatus(true);
+                renderActiveDispatchConsole(res.data.booking);
+                document.getElementById('liveDispatchConsole').scrollIntoView({ behavior: 'smooth' });
+                pollBookingsStatus(false);
             } else alert(res.message);
         });
 }
@@ -1129,7 +1623,7 @@ function handleMechanicBooking(e) {
     e.preventDefault();
     const btn = document.getElementById('btnDispatchMechanic');
     btn.disabled = true;
-    btn.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i> Submitting to Garage Radar...`;
+    btn.innerHTML = `<i class="fas fa-spinner fa-spin mr-2"></i> Dispatching Garage Radar Request...`;
 
     const form = document.getElementById('mechanicBookingForm');
     const fd = new FormData(form);
@@ -1142,10 +1636,10 @@ function handleMechanicBooking(e) {
             btn.disabled = false;
             btn.innerHTML = `<i class="fas fa-paper-plane text-base mr-2"></i> Confirm & Request Garage Service`;
             if (res.success) {
-                alert(`Mechanic request created! Code: ${res.data.booking_code}`);
                 form.reset();
-                switchDashboardTab('my_bookings');
-                pollBookingsStatus(true);
+                renderActiveDispatchConsole(res.data.booking);
+                document.getElementById('liveDispatchConsole').scrollIntoView({ behavior: 'smooth' });
+                pollBookingsStatus(false);
             } else alert(res.message);
         });
 }

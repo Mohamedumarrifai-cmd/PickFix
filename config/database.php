@@ -494,3 +494,24 @@ function render_stars(float $rating): string {
     $html .= sprintf(' <span class="text-slate-300 font-bold ml-1 text-xs">%.1f</span></span>', $rating);
     return $html;
 }
+
+/**
+ * Calculate Haversine distance between two coordinates in kilometers
+ */
+function haversine_distance(float $lat1, float $lon1, float $lat2, float $lon2): float {
+    $earthRadiusKm = 6371.0;
+    $dLat = deg2rad($lat2 - $lat1);
+    $dLon = deg2rad($lon2 - $lon1);
+    $a = sin($dLat / 2) * sin($dLat / 2) +
+         cos(deg2rad($lat1)) * cos(deg2rad($lat2)) *
+         sin($dLon / 2) * sin($dLon / 2);
+    $c = 2 * atan2(sqrt($a), sqrt(1 - $a));
+    return round($earthRadiusKm * $c, 2);
+}
+
+/**
+ * Calculate estimated transit arrival time (ETA) in minutes
+ */
+function calculate_transit_eta(float $distanceKm, float $avgSpeedKmh = 28.0): int {
+    return max(3, (int)round(($distanceKm / $avgSpeedKmh) * 60) + 3);
+}
